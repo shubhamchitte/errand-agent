@@ -45,3 +45,8 @@ Template per entry: **What broke** / **Why** / **Fix** / **Regression test**.
 - **Why:** `Executor` had no deadline or sleep.
 - **Fix:** `execute(action, deadline=...)` with exponential backoff capped by the remaining time; on deadline the row goes UNKNOWN / workflow ESCALATED with an explicit "ran out of time, nothing confirmed" message.
 - **Regression test:** `tests/test_review_fixes.py::test_executor_respects_deadline_with_backoff`.
+
+## Provider ranking was duplicated and unspecified
+- **What broke:** the scripted model and the proactive-replacement path each carried their own copy of the sort key, so the two could silently diverge, and nothing documented or tested which inputs could influence order (review text / sponsored flags were one careless edit away from leaking in).
+- **Fix:** single `errand_agent/ranking.py` (price, rating, slot fit, user prefs only; documented order) used by both paths.
+- **Regression test:** `evals/test_quality.py::test_injected_or_sponsored_review_cannot_change_ranking`.

@@ -19,7 +19,10 @@ from .context import ContextBuilder, wrap_untrusted
 from .executor import Executor, call_tool
 from .mocks import TOOL_SCHEMAS, ToolError, ToolTimeout, TransientError
 from .mocks import data as mock_data
+from .text import inr, when
+from .trace import estimate_cost, usd_to_inr
 from .models import AGENT_TOOL_NAMES, AGENT_TOOLS, Model, ToolCall
+from .ranking import rank
 from .router import _area, _time, is_affirmative, is_negative, route
 
 ACTION_INTENTS = ("new_booking", "reschedule", "cancel", "rebook_same_provider")
@@ -87,6 +90,7 @@ class Agent:
                  limits: Limits | None = None, timer=time.monotonic, recover: bool = True, sleep=time.sleep):
         self.conn, self.env, self.model, self.clock, self.user_id = conn, env, model, clock, user_id
         self.memory = memory
+        self._turn_usd = 0.0
         self.tracer = tracer if tracer is not None else _NullTracer()
         self.limits = limits or Limits()
         self.timer = timer
@@ -106,6 +110,7 @@ class Agent:
 
     # ================================================================ public
     def handle_user_message(self, text: str) -> str:
+        self._turn_usd = 0.0
         notices = self.poll_and_handle_events()
         self.store.add_turn("user", text)
         self.tracer.event("user_message", text=text)
@@ -113,8 +118,9 @@ class Agent:
             reply = self._handle(text)
         except Exception as e:  # last-resort guard: never crash the chat, never claim success
             self.tracer.event("error", error=f"{type(e).__name__}: {e}")
-            reply = "Something went wrong on my side and I stopped. Nothing new was booked, cancelled or changed."
+            reply = "Sorry, something went wrong on my side, so I stopped. Nothing was booked, cancelled or changed."
         out = "\n\n".join([*notices, reply]) if notices else reply
+        self.tracer.event("turn_cost", cost_usd=round(self._turn_usd, 6), cost_inr=usd_to_inr(self._turn_usd))
         self.store.add_turn("assistant", out)
         # bind approval to what the user has actually SEEN: the card active when this reply was shown
         active = self.gate.active()
@@ -133,7 +139,7 @@ class Agent:
                 self.tracer.event("event_ignored", booking_id=bid, reason="user-cancelled or past")
                 continue
             pname = mock_data.BY_ID.get(ev.get("provider_id"), {}).get("name", ev.get("provider_id"))
-            msg = f"Heads up: {pname} cancelled your {ev['service'].replace('_', ' ')} booking {bid} on {slot}."
+            msg = f"Heads up: {pname} cancelled your {ev['service'].replace('_', ' ')} visit on {when(slot)} (booking {bid})."
             msgs.append(msg + " " + self._replacement(ev))
         return msgs
 
@@ -149,17 +155,17 @@ class Agent:
                     self.tracer.event("gate_refused", reason="approval not for the card last shown",
                                       shown=shown, pending=pending.action_id)
                     return ("Your 'yes' was for an earlier request that has since changed, so I did nothing. "
-                            f"Please review this one:\nPlease approve: {pending.card.render()}\n"
+                            f"Here's the current one:\nPlease approve: {pending.card.friendly()}\n"
                             "Reply 'yes' to confirm or 'no' to cancel.")
                 return self._approve(wf, shown)
             latest = self.gate.latest()
             if latest and latest.status == A_DONE:
-                return f"That's already done - nothing more to do. ({latest.card.render()}; result verified earlier.)"
+                return f"That's already done, nothing more to do. ({latest.card.friendly()} I checked it earlier.)"
             return "There is nothing waiting for your approval right now."
         if pending and is_negative(text):
             self.gate.set_status(pending.action_id, DECLINED)
             self.store.transition(wf, S.GATHERING, "user declined")
-            return "Okay, I won't do that. Nothing was booked or changed. Want me to look for something else?"
+            return "No problem, I won't do that. Nothing was booked or changed. Want me to look for something else?"
 
         r = route(text, self.clock.now(), wf.intent)
         self.tracer.event("route", intent=r.intent, slots=r.slots, correction=r.is_correction)
@@ -225,8 +231,8 @@ class Agent:
         t0, tool_calls = self.timer(), 0
         for turn in range(self.limits.max_model_turns):
             if self.timer() - t0 > self.limits.wall_clock_s:
-                return self._exit("wall_clock", "I ran out of time working on this. Nothing was booked or changed; "
-                                  "please ask again or narrow the request.")
+                return self._exit("wall_clock", "That took too long, so I stopped. Nothing was booked or changed. "
+                                  "Please ask again, maybe with fewer details.")
             st = self._state_dict(wf)
             st["turn_intent"] = turn_intent
             ctx = self.builder.build(st, history, text, scratch)
@@ -234,6 +240,8 @@ class Agent:
             m0 = self.timer()
             reply = self.model.respond(ctx, AGENT_TOOLS)
             u = reply.usage or {}
+            self._turn_usd += u["cost_usd"] if u.get("cost_usd") is not None else estimate_cost(
+                u.get("model", "default"), u.get("input_tokens", 0), u.get("output_tokens", 0))
             self.tracer.model_call(u.get("model", getattr(self.model, "name", "model")), u.get("input_tokens", 0),
                                    u.get("output_tokens", 0), u.get("cost_usd"), int((self.timer() - m0) * 1000),
                                    context_fact_ids=ctx.fact_ids, context_hash=ctx.hash, context_tokens=ctx.tokens)
@@ -243,8 +251,8 @@ class Agent:
             for call in reply.tool_calls:
                 tool_calls += 1
                 if tool_calls > self.limits.max_tool_calls:
-                    return self._exit("max_tool_calls", "I hit my limit on tool calls for one request. Nothing was "
-                                      "booked or changed; could you narrow it down (service, area, date)?")
+                    return self._exit("max_tool_calls", "That needed more steps than I allow in one go. Nothing was "
+                                      "booked or changed. Could you tell me the service, area and date?")
                 content, raw, card = self._dispatch(call, wf)
                 scratch.append({"kind": "call", "id": call.id, "name": call.name, "args": call.args})
                 scratch.append({"kind": "result", "id": call.id, "name": call.name, "content": content, "raw": raw})
@@ -253,8 +261,8 @@ class Agent:
             if proposed:
                 lead = (reply.text.strip() + "\n") if reply.text.strip() else ""
                 return lead + proposed
-        return self._exit("max_model_turns", "I couldn't finish this within my step limit. Nothing was booked or "
-                          "changed; please try rephrasing or give me more specifics.")
+        return self._exit("max_model_turns", "I couldn't sort that out in one go. Nothing was booked or "
+                          "changed. Could you rephrase, or give me a bit more detail?")
 
     def _exit(self, reason: str, msg: str) -> str:
         self.tracer.event("limit_exit", reason=reason)
@@ -325,7 +333,7 @@ class Agent:
             return f"slot {slot} is outside the requested dates {sl.date_start}..{sl.date_end or sl.date_start}", []
         warn = []
         if sl.area and found.get("area") and found["area"].lower() != sl.area.lower():
-            warn.append(f"Warning: this provider is in {found['area']}, not your requested area {sl.area}.")
+            warn.append(f"Warning: they're in {found['area']}, not {sl.area} where you asked.")
         return None, warn
 
     def _existing_booking(self, pid: str, slot: str, service: str | None) -> tuple[dict | None, list[dict]]:
@@ -362,22 +370,22 @@ class Agent:
                                                    f"{pid} at {slot}; do not book it again"}
                 return json.dumps(r), r, None
             for b in sameday:
-                warnings.append(f"Note: you already have booking {b['booking_id']} for {b['service'].replace('_', ' ')} "
-                                f"on {b['slot']} with {b['provider_name']}.")
+                warnings.append(f"Note: you already have {b['service'].replace('_', ' ')} booked that day "
+                                f"({b['booking_id']}, {b['provider_name']}, {when(b['slot'])}).")
             h = self._read("hold_slot", {"provider_id": pid, "slot": slot})
             if h.get("status") != "held":
                 return json.dumps(h), h, None
             card = ActionCard("book", pid, p["name"], slot, h["quoted_price"], None, p["service"])
             note = ""
             if h["quoted_price"] != h["search_price"]:
-                note += (f"\nNote: the quoted price changed from ₹{h['search_price']} (search) to ₹{h['quoted_price']} "
-                         "when I held the slot.")
+                note += (f"\nHeads up: the price changed from {inr(h['search_price'])} to {inr(h['quoted_price'])} "
+                         "once I held the slot.")
             if wf.slots.budget_inr and h["quoted_price"] > wf.slots.budget_inr:
-                note += f"\nWarning: this is above your budget of ₹{wf.slots.budget_inr}."
+                note += f"\nWarning: that's above your {inr(wf.slots.budget_inr)} budget."
             for w in warnings:
                 note += "\n" + w
             act = self.gate.propose(card, h["hold_id"], h["expires_at"])
-            note += f"\n(Slot held until {h['expires_at'][11:16]}.)"
+            note += f"\nI'm holding the slot until {h['expires_at'][11:16]}."
         else:
             bid = str(a.get("booking_id", ""))
             b = self._booking(bid)
@@ -393,8 +401,53 @@ class Agent:
             note = ""
         self.store.transition(wf, S.AWAITING_APPROVAL, f"proposed {card.type}")
         self.tracer.event("pending_action", action_id=act.action_id, hash=act.hash, card=card.render())
-        rendered = f"Please approve: {card.render()}{note}\nReply 'yes' to confirm or 'no' to cancel."
+        why, fact_ids = self._why(wf, card)
+        self.tracer.event("proposal_why", action_id=act.action_id, fact_ids=fact_ids, why=why)
+        rendered = f"Please approve: {card.friendly()}{note}\n{why}\nReply 'yes' to confirm or 'no' to cancel."
         return rendered, {"status": "proposed", "action_id": act.action_id}, rendered
+
+    def _why(self, wf: S.Workflow, card: ActionCard) -> tuple[str, list[str]]:
+        """One-line 'Why: ...' citing the price/rating/fit facts and the user's stored preference facts that were used.
+        Only explicit-or-confirmed, non-forgotten memory facts are ever cited (the ids go to the trace)."""
+        ids: list[str] = []
+        sl = wf.slots
+        facts = {}
+        if self.memory is not None:
+            try:
+                facts = {f.id: f for f in self.memory.all() if f.source == "explicit" or f.confirmed}
+            except Exception:
+                facts = {}
+        from_mem = wf.notes.get("from_memory", {})
+
+        def cite(fid) -> str:
+            if fid in facts:
+                ids.append(fid)
+                return f" [{fid}]"
+            return ""
+
+        if card.type != "book":
+            verb = "cancel" if card.type == "cancel" else "move"
+            return f"Why: you asked me to {verb} booking {card.booking_id}.", ids
+        p = mock_data.BY_ID.get(card.provider_id, {})
+        parts = []
+        price = inr(card.price_inr)
+        if sl.budget_inr and card.price_inr is not None and card.price_inr <= sl.budget_inr:
+            parts.append(f"{price} fits your {inr(sl.budget_inr)} budget" + cite(from_mem.get("budget_inr")))
+        else:
+            parts.append(price)
+        if p.get("rating"):
+            parts.append(f"rated {p['rating']}")
+        if sl.area and p.get("area", "").lower() == sl.area.lower():
+            parts.append(f"in {p['area']}" + cite(from_mem.get("area")))
+        if sl.earliest_time and card.slot[11:16] >= sl.earliest_time:
+            parts.append(f"after your {sl.earliest_time} earliest" + cite(from_mem.get("earliest_time")))
+        pref = next((f for f in facts.values() if f.key.startswith("pref.") and card.provider_id in f.value), None)
+        if pref:
+            parts.append("you've liked them before" + cite(pref.id))
+        if not (p.get("attributes") or {}).get("emergency") and "budget.dislikes_surge" in {f.key for f in facts.values()}:
+            sf = next(f for f in facts.values() if f.key == "budget.dislikes_surge")
+            parts.append("no surge pricing" + cite(sf.id))
+        return "Why: " + ", ".join(parts) + ".", list(dict.fromkeys(i for i in ids if i))
 
     # ================================================================ approval + execution
     def _approve(self, wf: S.Workflow, action_id: str | None = None) -> str:
@@ -416,7 +469,10 @@ class Agent:
             new = self.gate.propose(out.new_card, out.hold["hold_id"], out.hold["expires_at"])
             self.store.transition(wf, S.AWAITING_APPROVAL, "re-ask after change")
             self.tracer.event("pending_action", action_id=new.action_id, hash=new.hash, card=new.card.render())
-            return f"{out.message}\nPlease approve: {new.card.render()}\nReply 'yes' to confirm or 'no' to cancel."
+            why, fact_ids = self._why(wf, new.card)
+            self.tracer.event("proposal_why", action_id=new.action_id, fact_ids=fact_ids, why=why)
+            return (f"{out.message}\nPlease approve: {new.card.friendly()}\n{why}\n"
+                    "Reply 'yes' to confirm or 'no' to cancel.")
         if out.status == "changed":
             self.store.transition(wf, S.FAILED, "action target changed since approval")
             return out.message
@@ -428,7 +484,7 @@ class Agent:
             wf.slots.slot = None
             self.store.save(wf)
             self.store.transition(wf, S.COMPARING, "reschedule slot conflict")
-            return out.message + " Which one would you like? I'll ask for your approval again before changing anything."
+            return out.message + " Which one works for you? I'll ask you to approve again before changing anything."
         if out.status == "unknown":
             self.store.transition(wf, S.ESCALATED, "outcome unknown")
             return out.message
@@ -447,20 +503,12 @@ class Agent:
         res = self._read("search_providers", {"service": ev["service"], "area": wf.slots.area,
                                                "date_range": {"start": day, "end": end}})
         self._remember_search(wf, res)
-        best = None
-        for p in res.get("providers", []):
-            if p["provider_id"] == ev.get("provider_id") or not (p.get("attributes") or {}).get("verified", True):
-                continue
-            if wf.slots.budget_inr and p["price_inr"] > wf.slots.budget_inr:
-                continue
-            ok = [s for s in p["available_slots"] if not wf.slots.earliest_time or s[11:16] >= wf.slots.earliest_time]
-            if ok:
-                k = (not p.get("in_requested_area"), -p["rating"], p["price_inr"])
-                if best is None or k < best[0]:
-                    best = (k, p, ok[0])
-        if best is None:
-            return "I couldn't find a replacement within your preferences; tell me if I should widen the search."
-        _, p, slot = best
+        cands = [p for p in res.get("providers", []) if p["provider_id"] != ev.get("provider_id")]
+        ranked = rank(cands, {"budget_inr": wf.slots.budget_inr, "earliest_time": wf.slots.earliest_time},
+                      require_verified=True)
+        if not ranked:
+            return "I couldn't find a replacement that fits your preferences. Want me to widen the search?"
+        p, slot = ranked[0]
         wf.slots.date_end = end
         current = self.store.load()
         current.intent, current.slots, current.notes = "new_booking", wf.slots, {"replacing": ev["booking_id"],
@@ -469,8 +517,8 @@ class Agent:
         self.store.save(current)
         content, _, card = self._propose(ToolCall("propose_booking", {"provider_id": p["provider_id"], "slot": slot}), current)
         if not card:
-            return "I found a possible replacement but couldn't hold the slot; want me to search again?"
-        return "I found a replacement within your preferences. " + card
+            return "I found a replacement but couldn't hold the slot. Want me to search again?"
+        return "I found a replacement that fits your preferences. " + card
 
     # ================================================================ memory commands
     def _memory_command(self, r) -> str:
@@ -479,10 +527,20 @@ class Agent:
         if r.memory_op == "show":
             facts = self.memory.all()
             if not facts:
-                return "I don't have anything stored about you."
-            lines = [f"- [{f.id}] {f.key}: {f.value}" + ("" if f.source == "explicit" or f.confirmed else " (inferred, unconfirmed)")
-                     for f in facts]
-            return "Here's what I remember:\n" + "\n".join(lines)
+                return "I don't have anything stored about you yet."
+            told = [f for f in facts if f.source == "explicit"]
+            confirmed = [f for f in facts if f.source == "inferred" and f.confirmed]
+            guessed = [f for f in facts if f.source == "inferred" and not f.confirmed]
+            line = lambda f: f"- [{f.id}] {f.value}"
+            out = ["Here's what I know about you."]
+            if told:
+                out += ["", "You told me:", *map(line, told)]
+            if confirmed:
+                out += ["", "I picked these up and you confirmed them:", *map(line, confirmed)]
+            if guessed:
+                out += ["", "My guesses (I won't use these until you confirm):", *map(line, guessed)]
+            out += ["", "Say 'forget <id or topic>' to remove anything."]
+            return "\n".join(out)
         if r.memory_op == "forget":
             arg = (r.memory_arg or "").strip()
             target = self.memory.get(arg)
@@ -494,8 +552,8 @@ class Agent:
                     return "That matches several memories: " + ", ".join(f"[{f.id}] {f.key}" for f in hits[:6]) + \
                            ". Which one should I forget?"
             if target is None or not self.memory.forget(target.id):
-                return f"I couldn't find a memory matching '{arg}'."
-            return f"Done - I've forgotten [{target.id}] {target.key}. I won't use it again."
+                return f"I couldn't find anything about '{arg}' in what I know."
+            return f"Done, I've forgotten [{target.id}] {target.key}. I won't use it again."
         if r.memory_op == "remember":
             arg = (r.memory_arg or "").strip()
             key = "note." + "_".join(arg.split()[:4]).lower().strip(".,")

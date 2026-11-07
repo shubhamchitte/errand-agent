@@ -163,7 +163,7 @@ def test_rehold_price_change_invalidates_and_reasks(tmp_path):
     clock.advance(minutes=11)
     sc.provider_quote_drift["p_elc_1"] = 200
     out = a.handle_user_message("yes")
-    assert "approval again" in out and env.call_count("book") == 0
+    assert "price changed from" in out and env.call_count("book") == 0
     assert a.gate.get(first.action_id).status == INVALIDATED
     assert a.gate.active().card.price_inr == 900
     out = a.handle_user_message("yes")
@@ -250,14 +250,14 @@ def test_unverifiable_never_claims_success(tmp_path):
     a, env, conn, _ = mk(tmp_path, sc)
     a.handle_user_message(f"electrician in Indiranagar on {MON}")
     out = a.handle_user_message("yes")
-    assert "Booked" not in out and "Nothing was confirmed" in out
+    assert "Booked" not in out and "still checking" in out
     assert a.store.load().state == S.ESCALATED
 
 
 def test_cancel_503_retry_and_repeat_confirm(tmp_path):
     a, env, conn, _ = mk(tmp_path)
-    assert "CANCEL booking bk_seed_4" in a.handle_user_message("cancel my AC servicing booking")
-    assert "Cancelled booking bk_seed_4" in a.handle_user_message("yes")
+    assert "Cancel booking bk_seed_4" in a.handle_user_message("cancel my AC servicing booking")
+    assert "Cancelled (verified): booking bk_seed_4" in a.handle_user_message("yes")
     assert env.call_count("cancel") == 2  # 503 then success
     a.handle_user_message("yes")
     assert env.call_count("cancel") == 2
@@ -269,12 +269,12 @@ def test_reschedule_conflict_needs_fresh_approval(tmp_path):
     a, env, conn, _ = mk(tmp_path, Scenario(seed=1, conflict_slots={bad}))
     a.handle_user_message(f"reschedule my AC servicing to {bad}")
     out = a.handle_user_message("yes")
-    assert "Alternatives:" in out and a.store.load().state == S.COMPARING
+    assert "Other times:" in out and a.store.load().state == S.COMPARING
     assert a.gate.active() is None  # never auto-picks
     alt = a.store.load().notes["alternatives"][0]
     out = a.handle_user_message(f"move it to {alt.replace('T', ' ')}")
-    assert "RESCHEDULE" in out and alt in out
-    assert "Rescheduled" in a.handle_user_message("yes")
+    assert "Move booking" in out and "Mon 9 Nov, 10:00" in out
+    assert "Moved (verified)" in a.handle_user_message("yes")
     a.handle_user_message("yes")
     assert env.call_count("reschedule") == 2
 
@@ -360,12 +360,12 @@ def test_context_truncates_huge_tool_result_and_is_deterministic():
 def test_limits_each_exit_has_message(tmp_path):
     loop = lambda ctx, tools: ModelReply(tool_calls=[ToolCall("list_bookings", {"user_id": "u_demo"})])
     a, *_ = mk(tmp_path, script=[loop] * 50, limits=Limits(max_model_turns=3, max_tool_calls=99))
-    assert "step limit" in a.handle_user_message("hello")
+    assert "in one go" in a.handle_user_message("hello")
     a, *_ = mk(tmp_path, script=[loop] * 50, limits=Limits(max_model_turns=99, max_tool_calls=2))
-    assert "limit on tool calls" in a.handle_user_message("hello")
+    assert "more steps than I allow" in a.handle_user_message("hello")
     t = iter(range(0, 10000, 50))
     a, *_ = mk(tmp_path, script=[loop] * 50, limits=Limits(wall_clock_s=60), timer=lambda: next(t))
-    assert "ran out of time" in a.handle_user_message("hello")
+    assert "took too long" in a.handle_user_message("hello")
     assert events(a, "limit_exit")
 
 

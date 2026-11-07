@@ -60,7 +60,7 @@ def trace_items(events: list[dict], width: int) -> list[tuple[Any, int]]:
             line("bold cyan", f"{ts} STATE {e['frm']} -> {e['to']}" + (f"  ({e['reason']})" if e.get("reason") else ""))
         elif t == "model_call":
             line("magenta", f"{ts} MODEL {e['model']} in={e['input_tokens']} out={e['output_tokens']} "
-                            f"${e['cost_usd']:.4f} {e['latency_ms']:.0f}ms")
+                            f"${e['cost_usd']:.4f} (₹{e.get('cost_inr', 0):.2f}) {e['latency_ms']:.0f}ms")
         elif t == "tool_call":
             err = e.get("error")
             line("red" if err else "green",
@@ -75,6 +75,8 @@ def trace_items(events: list[dict], width: int) -> list[tuple[Any, int]]:
             body = Text("\n".join(card), style="bold")
             out.append((Panel(body, title="APPROVAL CARD", border_style="bold yellow", style="on grey15", padding=(0, 1)),
                         len(card) + 2))
+        elif t == "turn_cost":
+            line("magenta", f"{ts} TURN COST ${e['cost_usd']:.4f} (₹{e['cost_inr']:.2f})")
         elif t == "approved":
             line("bold green", f"{ts} APPROVED {_short({k: v for k, v in e.items() if k not in ('ts', 'run_id', 'type')}, 80)}")
         elif t in ("error", "gate_refused", "proposal_refused", "approval_invalidated", "approval_stale", "blocked_tool",
@@ -123,7 +125,7 @@ def render(console: Console, agent: Agent, msgs: list[tuple[str, str]], busy: bo
     left = Panel(Group(*chat_lines(msgs, lw - 4, inner_h)), title=f"Chat - {agent.model.name}" + (" (thinking...)" if busy else ""),
                  border_style="blue", height=H)
     stats = (f"calls={s.get('model_calls', 0)} tok={s.get('input_tokens', 0)}/{s.get('output_tokens', 0)} "
-             f"${s.get('cost_usd', 0):.4f} tools={s.get('tool_calls', 0)} err={s.get('tool_errors', 0)}")
+             f"${s.get('cost_usd', 0):.4f}/₹{s.get('cost_inr', 0):.2f} tools={s.get('tool_calls', 0)} err={s.get('tool_errors', 0)}")
     right = Panel(Group(*tail_fit(trace_items(events, rw - 4), inner_h)), title=f"Trace - {stats}",
                   border_style="magenta", height=H)
     lay = Layout()

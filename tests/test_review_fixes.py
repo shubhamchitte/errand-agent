@@ -71,7 +71,7 @@ def test_book_same_thing_twice_refused(tmp_path):
                                     "electrician"), "hold_x", "2099-01-01T00:00:00")
     a.store.set_shown(act.action_id)
     out = a.handle_user_message("yes")
-    assert "already have this booking" in out and b["booking_id"] in out
+    assert "already booked" in out and b["booking_id"] in out
     assert env.call_count("book") == 1 and len(bookings(conn, "idem-%")) == 1
 
 
@@ -80,7 +80,7 @@ def test_second_same_day_booking_is_flagged_on_card(tmp_path):
     a.handle_user_message(f"electrician in Indiranagar on {MON}")
     a.handle_user_message("yes")
     out = a.handle_user_message(f"I need an electrician in Indiranagar on {MON}")
-    assert "you already have booking" in out
+    assert "you already have" in out
 
 
 # ------------------------------------------------------------ #4 Agent SDK native tool calls (no live call)
@@ -157,7 +157,7 @@ def test_tool_call_storm_is_bounded(tmp_path):
     storm = ModelReply(tool_calls=[ToolCall("list_bookings", {"user_id": "u_demo"})] * 50)
     sleeps = []
     a, env, *_ = mk(tmp_path, sc, script=[storm] * 5, sleep=sleeps.append, limits=Limits(max_tool_calls=4))
-    assert "limit on tool calls" in a.handle_user_message("hello")
+    assert "more steps than I allow" in a.handle_user_message("hello")
     assert env.call_count("list_bookings") <= 4 * 3 and len(sleeps) <= 4 * 2
 
 
@@ -216,4 +216,4 @@ def test_out_of_area_proposal_flagged_on_card(tmp_path):
         return ModelReply(tool_calls=[ToolCall("propose_booking", {"provider_id": far["provider_id"], "slot": ok})])
     a, env, *_ = mk(tmp_path, script=[_search(), pick])
     out = a.handle_user_message(f"electrician in Indiranagar on {MON}")
-    assert "Please approve" in out and "not your requested area Indiranagar" in out
+    assert "Please approve" in out and "not Indiranagar" in out

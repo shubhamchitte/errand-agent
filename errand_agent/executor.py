@@ -18,6 +18,7 @@ from . import db
 from .approval import DONE as A_DONE, EXECUTING as A_EXEC, FAILED as A_FAILED, ActionCard, ApprovalGate, PendingAction
 from .clock import Clock
 from .mocks import ToolError, ToolTimeout, TransientError
+from .text import inr, when
 from .trace import sanitize as _sanitize
 
 EXECUTING, VERIFYING, DONE, FAILED, UNKNOWN = "EXECUTING", "VERIFYING", "DONE", "FAILED", "UNKNOWN"
@@ -149,8 +150,8 @@ class Executor:
             if dup:
                 self.gate.set_status(action.action_id, A_FAILED, {"reason": "duplicate", "booking_id": dup["booking_id"]})
                 self._event("duplicate_refused", action_id=action.action_id, booking_id=dup["booking_id"])
-                return Outcome("duplicate", f"You already have this booking: {dup['booking_id']} with {c.provider_name} "
-                                            f"on {c.slot}. I did not book it again.", dup)
+                return Outcome("duplicate", f"You're already booked: {dup['booking_id']} with {c.provider_name} "
+                                            f"on {when(c.slot)}. I didn't book it a second time.", dup)
             return None
         b = next((x for x in bks if x["booking_id"] == c.booking_id), None)
         if b is None or b.get("status") != "confirmed":
@@ -165,11 +166,11 @@ class Executor:
     def _changed(self, action: PendingAction, why: str) -> Outcome:
         self.gate.set_status(action.action_id, "INVALIDATED", {"reason": why})
         self._event("approval_stale", action_id=action.action_id, reason=why)
-        return Outcome("changed", f"I did not {action.type}: {why}. Nothing was changed; tell me if you still want it.")
+        return Outcome("changed", f"I didn't {action.type} anything, because {why}. Nothing was changed. Tell me if you still want it.")
 
     def _fail_pre(self, action: PendingAction, why: str) -> Outcome:
         self.gate.set_status(action.action_id, A_FAILED, {"reason": why})
-        return Outcome("failed", f"{why}, so I didn't {action.type} anything. Please try again.")
+        return Outcome("failed", f"{why}, so I didn't {action.type} anything. Nothing was changed. Please try again in a moment.")
 
     def _args(self, action: PendingAction, key: str) -> dict:
         c = action.card
@@ -190,16 +191,16 @@ class Executor:
             h = self._call("hold_slot", provider_id=c.provider_id, slot=c.slot)
         except ToolError as e:
             self.gate.set_status(action.action_id, A_FAILED, {"error": str(e)})
-            return Outcome("failed", f"I couldn't re-hold {c.slot} with {c.provider_name} ({e}). Nothing was booked.")
+            return Outcome("failed", f"I couldn't hold {when(c.slot)} with {c.provider_name} again. Nothing was booked and nothing was charged. Try again in a few minutes?")
         if h.get("status") != "held":
             self.gate.set_status(action.action_id, A_FAILED, h)
-            return Outcome("failed", f"The hold expired and {c.slot} with {c.provider_name} is no longer available. "
-                                     "Nothing was booked.", h)
+            return Outcome("failed", f"The hold on {when(c.slot)} with {c.provider_name} ran out, and the slot has gone. "
+                                     "Nothing was booked and nothing was charged. Want me to find another time?", h)
         if h["quoted_price"] != c.price_inr or h["slot"] != c.slot:
             self.gate.set_status(action.action_id, "INVALIDATED", {"reason": "re-hold changed", "hold": h})
             new = ActionCard("book", c.provider_id, c.provider_name, h["slot"], h["quoted_price"], None, c.service)
-            return Outcome("reask", f"The hold expired and the re-held price changed from ₹{c.price_inr} to "
-                                    f"₹{h['quoted_price']}. I need your approval again.", h, new_card=new, hold=h)
+            return Outcome("reask", f"The hold ran out and the price changed from {inr(c.price_inr)} to "
+                                    f"{inr(h['quoted_price'])}. Nothing is booked yet. Is the new price okay?", h, new_card=new, hold=h)
         self.gate.update_hold(action.action_id, h["hold_id"], h["expires_at"])
         return None
 
@@ -212,7 +213,7 @@ class Executor:
                 if verify_needed or attempt > 1:
                     return self._unknown(key, action, timed_out=True)
                 self._set(key, FAILED)
-                return Outcome("failed", f"I ran out of time before attempting the {action.type}. Nothing was done.")
+                return Outcome("failed", f"That took too long, so I didn't {action.type} anything. Nothing was changed or charged.")
             if attempt > 1:
                 self._backoff(attempt - 1)
             self._set(key, EXECUTING, bump=True)
@@ -228,14 +229,17 @@ class Executor:
                 if v is UNVERIFIABLE:
                     return self._unknown(key, action)
                 if v is not None:
+                    v.message += (" The request timed out on the way, but I checked: "
+                                  "you're booked once, not twice, and nothing was charged twice." if action.type == "book"
+                                  else " The request timed out on the way, but I checked and it went through once, not twice.")
                     return v
                 verify_needed = True  # verified NOT executed; safe to retry with the same key
                 continue
         if res is None:
             self._set(key, UNKNOWN if verify_needed else FAILED)
             return Outcome("unknown" if verify_needed else "failed",
-                           f"I couldn't complete the {action.type} after {MAX_ATTEMPTS} attempts "
-                           "(the service kept failing). Nothing was confirmed; please try again later.")
+                           f"The {'booking' if action.type == 'book' else action.type} service is down right now (503), and I tried {MAX_ATTEMPTS} times. "
+                           "Nothing was booked or charged. Please try again in a few minutes.")
         return self._interpret(action, key, res)
 
     def _interpret(self, action: PendingAction, key: str, res: dict) -> Outcome:
@@ -251,38 +255,38 @@ class Executor:
                 if v is not None:
                     return v
                 self._set(key, FAILED, res)
-                return Outcome("failed", "The booking response said confirmed but the status check disagrees; "
-                                         "I am not treating it as booked.", res)
+                return Outcome("failed", "The service said it was confirmed, but my status check doesn't agree. "
+                                         "I'm not treating it as booked and nothing is charged. Want me to try again?", res)
             self._set(key, FAILED, res)
-            why = {"slot_taken": f"{c.slot} was just taken by someone else",
-                   "hold_expired": "the hold expired before booking"}.get(st, st)
-            return Outcome("failed", f"Booking failed: {why}. Nothing was booked.", res)
+            why = {"slot_taken": f"{when(c.slot)} was just taken by someone else",
+                   "hold_expired": "the hold ran out before I could book"}.get(st, st)
+            return Outcome("failed", f"That didn't go through: {why}. Nothing was booked and nothing was charged. Want me to look at other options?", res)
         if action.type == "cancel":
             if st == "cancelled":
                 self._set(key, DONE, res)
                 return Outcome("done", self._success_msg(action, res), res)
             self._set(key, FAILED, res)
-            return Outcome("failed", f"Could not cancel {c.booking_id}: {st}.", res)
+            return Outcome("failed", f"I couldn't cancel {c.booking_id} ({st}). Nothing was changed. Want me to try again?", res)
         if st == "rescheduled":
             self._set(key, DONE, res)
             return Outcome("done", self._success_msg(action, res), res)
         if st == "slot_conflict":
             self._set(key, FAILED, res)
             alts = list(res.get("alternatives") or [])
-            return Outcome("conflict", f"{c.slot} is not available for {c.booking_id}."
-                           + (f" Alternatives: {', '.join(alts)}." if alts else " No alternatives offered."),
+            return Outcome("conflict", f"{when(c.slot)} isn't free for {c.booking_id}. Your current booking is unchanged."
+                           + (f" Other times: {', '.join(when(a) for a in alts)}." if alts else " There are no other times right now."),
                            res, alternatives=alts)
         self._set(key, FAILED, res)
-        return Outcome("failed", f"Could not reschedule {c.booking_id}: {st}.", res)
+        return Outcome("failed", f"I couldn't move {c.booking_id} ({st}). Your current booking is unchanged.", res)
 
     def _unknown(self, key: str, action: PendingAction, timed_out: bool = False) -> Outcome:
         self._set(key, UNKNOWN)
         if timed_out:
-            return Outcome("unknown", f"I ran out of time while the {action.type} service was failing. Nothing was "
-                                      "confirmed; I've flagged it for a follow-up check and will not repeat it blindly.")
-        return Outcome("unknown", f"I couldn't verify whether the {action.type} went through (the status service is "
-                                  "not responding). Nothing was confirmed; I will re-check automatically and will not "
-                                  "repeat it blindly.")
+            return Outcome("unknown", f"I ran out of time while the {action.type} service was having trouble. I can't say yet whether it went "
+                                      "through. I'll check again and won't send it twice, so you won't be charged twice.")
+        return Outcome("unknown", f"I'm still checking whether the {action.type} went through, because the status service isn't answering. "
+                                  "Nothing is charged twice: I'll re-check on my own and won't repeat it blindly. "
+                                  "I'll tell you as soon as I know.")
 
     def verify(self, action: PendingAction, key: str):
         """Authoritative check. Returns a done Outcome if the effect happened, None if it verifiably did NOT,
@@ -318,11 +322,11 @@ class Executor:
     def _success_msg(self, action: PendingAction, res: dict) -> str:
         c = action.card
         if action.type == "book":
-            return (f"Booked (verified): {c.provider_name} on {res.get('slot', c.slot)} for ₹{res.get('price', c.price_inr)}. "
-                    f"Booking id {res.get('booking_id')}.")
+            return (f"Booked (verified): {c.provider_name} on {when(res.get('slot', c.slot))} for "
+                    f"{inr(res.get('price', c.price_inr))}. Booking id {res.get('booking_id')}.")
         if action.type == "cancel":
-            return f"Cancelled booking {c.booking_id} with {c.provider_name} (verified)."
-        return f"Rescheduled booking {c.booking_id} with {c.provider_name} to {c.slot} (verified)."
+            return f"Cancelled (verified): booking {c.booking_id} with {c.provider_name}. Nothing more to do."
+        return f"Moved (verified): booking {c.booking_id} with {c.provider_name} is now {when(c.slot)}."
 
     def _finish(self, action: PendingAction, out: Outcome) -> Outcome:
         if out.status == "done":
@@ -359,6 +363,6 @@ class Executor:
         for a in self.gate.in_flight():
             if not self._row(self.key_for(a)):
                 self.gate.set_status(a.action_id, A_FAILED, {"reason": "interrupted before execution"})
-                outs.append(Outcome("failed", f"An approved {a.type} was interrupted before it ran; nothing was "
-                                              "executed. Please confirm again if you still want it."))
+                outs.append(Outcome("failed", f"Your approved {a.type} was interrupted before it started, so nothing was "
+                                              "done or charged. Please confirm again if you still want it."))
         return outs

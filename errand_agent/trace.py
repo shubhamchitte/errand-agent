@@ -17,6 +17,8 @@ PRICES: dict[str, tuple[float, float]] = {
     "claude-opus": (15.0, 75.0),
     "default": (3.0, 15.0),
 }
+# Fixed, documented conversion for display only (not a live FX rate): 1 USD = 84 INR.
+USD_TO_INR = 84.0
 MAX_STR = 200
 _SECRET_KEY = re.compile(
     r"(password|passwd|secret|api[_-]?key|authorization|gate_code|(^|[_-])(token|otp|pin|card(_number)?)$)", re.I)
@@ -35,6 +37,10 @@ def sanitize(obj: Any) -> Any:
     if obj is None or isinstance(obj, (bool, int, float)):
         return obj
     return sanitize(str(obj))
+
+
+def usd_to_inr(usd: float) -> float:
+    return round(usd * USD_TO_INR, 4)
 
 
 def estimate_cost(model: str, in_tok: int, out_tok: int) -> float:
@@ -79,7 +85,7 @@ class Tracer:
         if cost_usd is None:
             cost_usd = estimate_cost(model, input_tokens, output_tokens)
         return self.event("model_call", model=model, input_tokens=input_tokens, output_tokens=output_tokens,
-                          cost_usd=cost_usd, latency_ms=latency_ms, context_fact_ids=list(context_fact_ids),
+                          cost_usd=cost_usd, cost_inr=usd_to_inr(cost_usd), latency_ms=latency_ms, context_fact_ids=list(context_fact_ids),
                           context_hash=context_hash, context_tokens=context_tokens)
 
     def tool_call(self, name: str, args: Any, result_sanitized: Any, latency_ms: float = 0, error: str | None = None) -> dict:
@@ -97,6 +103,7 @@ class Tracer:
             "input_tokens": sum(e["input_tokens"] for e in mc),
             "output_tokens": sum(e["output_tokens"] for e in mc),
             "cost_usd": round(sum(e["cost_usd"] for e in mc), 6),
+            "cost_inr": usd_to_inr(sum(e["cost_usd"] for e in mc)),
             "model_latency_ms": sum(e["latency_ms"] for e in mc),
             "tool_calls": len(tc),
             "tool_errors": sum(1 for e in tc if e.get("error")),

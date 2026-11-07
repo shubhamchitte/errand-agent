@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 
 from . import db
 from .clock import Clock
+from .text import inr, when
 
 PENDING, EXECUTING, DONE, FAILED = "PENDING", "EXECUTING", "DONE", "FAILED"
 INVALIDATED, SUPERSEDED, DECLINED, EXPIRED = "INVALIDATED", "SUPERSEDED", "DECLINED", "EXPIRED"
@@ -39,11 +40,22 @@ class ActionCard:
         return hashlib.sha256(self.canonical().encode()).hexdigest()
 
     def render(self) -> str:
-        price = f"₹{self.price_inr}" if self.price_inr is not None else "n/a"
+        price = inr(self.price_inr)
         verb = {"book": "BOOK", "cancel": "CANCEL booking", "reschedule": "RESCHEDULE booking"}[self.type]
         bk = f" {self.booking_id}" if self.booking_id else ""
         what = f"to {self.slot}" if self.type == "reschedule" else f"on {self.slot}"
         return f"[{verb}{bk}] {self.provider_name} ({self.provider_id}) {what} - price {price}"
+
+
+    def friendly(self) -> str:
+        """Short, plain-words version shown to the user (render() stays the canonical machine-readable form)."""
+        bk = f" {self.booking_id}" if self.booking_id else ""
+        who = self.provider_name
+        if self.type == "book":
+            return f"Book {who} on {when(self.slot)} for {inr(self.price_inr)}."
+        if self.type == "cancel":
+            return f"Cancel booking{bk} with {who} ({when(self.slot)})."
+        return f"Move booking{bk} with {who} to {when(self.slot)} ({inr(self.price_inr)})."
 
 
 @dataclass

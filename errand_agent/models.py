@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .mocks import TOOL_SCHEMAS
+from .ranking import rank
 
 
 @dataclass
@@ -130,19 +131,13 @@ def heuristic_policy(ctx: Context, tools: list[dict]) -> ModelReply:
             dr = {"start": sl.get("date_start"), "end": sl.get("date_end") or sl.get("date_start")} if sl.get("date_start") else None
             return ModelReply(tool_calls=[ToolCall("search_providers", {"service": sl.get("service"), "area": sl.get("area") or "",
                                                                          "date_range": dr})])
-        cands = []
-        for p in sr[-1].get("providers", []):
-            if want_pid and p["provider_id"] != want_pid:
-                continue
-            if sl.get("budget_inr") and p["price_inr"] > sl["budget_inr"]:
-                continue
-            ok = [s for s in p["available_slots"] if _slot_ok(s, sl)]
-            if ok:
-                cands.append((not p.get("in_requested_area", True) if not want_pid else False, -p["rating"], p["price_inr"], ok[0], p))
+        provs = [p for p in sr[-1].get("providers", []) if not want_pid or p["provider_id"] == want_pid]
+        if want_pid:  # asking for a specific provider: area fit is irrelevant
+            provs = [{**p, "in_requested_area": True} for p in provs]
+        cands = rank(provs, sl)
         if not cands:
             return ModelReply(text="I couldn't find a provider matching all your constraints. Want me to relax the budget, time or dates?")
-        cands.sort(key=lambda c: c[:3])
-        _, _, _, slot, p = cands[0]
+        p, slot = cands[0]
         return ModelReply(text=f"Best option: {p['name']}.", tool_calls=[ToolCall("propose_booking", {"provider_id": p["provider_id"], "slot": slot})])
     if intent in ("cancel", "reschedule"):
         lb = _results(ctx, "list_bookings")

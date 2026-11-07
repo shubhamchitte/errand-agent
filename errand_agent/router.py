@@ -13,9 +13,14 @@ from .mocks import data as mock_data
 
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
-_AFFIRM = re.compile(r"^\s*(yes|yep|yeah|y|ok|okay|sure|confirm(ed)?|approve(d)?|go ahead|do it|book it|please do|"
+# Hinglish (romanised Hindi) support is a small explicit vocabulary, not a translator: yes/no words, relative days,
+# weekday names, "<n> tak" budgets, "<n> baje ke baad" times, and a few verbs (chahiye, shift/badlo, raddh).
+_HI_WEEKDAYS = {"somvar": 0, "mangalvar": 1, "budhvar": 2, "guruvar": 3, "veervar": 3, "shukravar": 4,
+                "shanivar": 5, "shaniwar": 5, "ravivar": 6, "itwar": 6}
+
+_AFFIRM = re.compile(r"^\s*(yes|haan kar do|haan karo|haan ji|haan|han|haa|ha|theek hai|thik hai|kar do|karo|yep|yeah|y|ok|okay|sure|confirm(ed)?|approve(d)?|go ahead|do it|book it|please do|"
                      r"proceed|sounds good|yes please|go for it)\b[\s!.,]*(please|it|that|now)?[\s!.]*$", re.I)
-_NEGATE = re.compile(r"\b(no|nope|don'?t|do not|stop|cancel that|wait|hold on|not yet|never ?mind|decline)\b", re.I)
+_NEGATE = re.compile(r"\b(no|nahi|nahin|mat karo|ruko|nope|don'?t|do not|stop|cancel that|wait|hold on|not yet|never ?mind|decline)\b", re.I)
 
 
 def is_affirmative(text: str) -> bool:
@@ -28,7 +33,7 @@ def is_affirmative(text: str) -> bool:
 
 def is_negative(text: str) -> bool:
     t = text.strip().lower()
-    return bool(re.match(r"^(no|nope|don'?t|do not|stop|not now|never ?mind|decline|cancel that|forget it)\b", t))
+    return bool(re.match(r"^(no|nahi|nahin|mat karo|ruko|nope|don'?t|do not|stop|not now|never ?mind|decline|cancel that|forget it)\b", t))
 
 
 @dataclass
@@ -57,6 +62,11 @@ def _area(t: str) -> str | None:
 
 
 def _time(t: str) -> str | None:
+    m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*baje\s*(?:ke\s*)?(?:baad|k baad)", t)
+    if m:
+        h, mi, ap = int(m.group(1)), int(m.group(2) or 0), m.group(3)
+        h = h + 12 if ap == "pm" and h < 12 else (0 if ap == "am" and h == 12 else h)
+        return f"{h:02d}:{mi:02d}" if 0 <= h < 24 else None
     m = re.search(r"(?:not before|after|from|no earlier than|earliest|later than)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", t)
     if not m:
         return None
@@ -69,6 +79,9 @@ def _time(t: str) -> str | None:
 
 
 def _budget(t: str) -> int | None:
+    m = re.search(r"(?:₹|rs\.?|inr)?\s*(\d[\d,]*)\s*(?:rs|rupay[ae]?|rupees)?\s*(?:tak|ke andar|se kam|max)\b", t)
+    if m:
+        return int(m.group(1).replace(",", ""))
     m = re.search(r"(?:under|below|budget(?: of| is)?|max(?:imum)?|upto|up to|within|less than)\s*(?:₹|rs\.?|inr)?\s*(\d[\d,]*)", t)
     if not m:
         m = re.search(r"(?:₹|rs\.?\s?|inr\s?)(\d[\d,]*)", t)
@@ -79,6 +92,21 @@ def _dates(t: str, today: date) -> tuple[str | None, str | None]:
     m = re.findall(r"\b(\d{4}-\d{2}-\d{2})\b", t)
     if m:
         return m[0], m[-1]
+    if re.search(r"\bparso\b", t):
+        d = today + timedelta(days=2)
+        return d.isoformat(), d.isoformat()
+    if re.search(r"\bkal\b", t):  # "kal" means both yesterday and tomorrow; for bookings it is always tomorrow
+        d = today + timedelta(days=1)
+        return d.isoformat(), d.isoformat()
+    if re.search(r"\baaj\b", t):
+        return today.isoformat(), today.isoformat()
+    if re.search(r"\bagle hafte\b", t):
+        mon = today + timedelta(days=7 - today.weekday())
+        return mon.isoformat(), (mon + timedelta(days=6)).isoformat()
+    for wd, i in _HI_WEEKDAYS.items():
+        if re.search(rf"\b{wd}\b", t):
+            d = today + timedelta(days=(i - today.weekday()) % 7 or 7)
+            return d.isoformat(), d.isoformat()
     if "day after tomorrow" in t:
         d = today + timedelta(days=2)
         return d.isoformat(), d.isoformat()
@@ -134,7 +162,8 @@ def route(text: str, now: datetime, current_intent: str | None = None) -> Routed
     t = text.lower().strip()
     slots = extract_slots(text, now)
     # memory commands
-    if re.search(r"what do you (remember|know)|show (me )?(my )?memor|my preferences|list memor", t):
+    if re.search(r"what do you (remember|know)|show (me )?(my )?memor|my preferences|list memor|"
+                 r"mere baare mein|meri preferences|kya yaad hai", t):
         return Routed("memory_command", {}, "show")
     m = re.match(r"^\s*forget\s+(?:that\s+|about\s+|my\s+)*(.+?)[.!]?\s*$", t)
     if m:
@@ -143,15 +172,15 @@ def route(text: str, now: datetime, current_intent: str | None = None) -> Routed
     if m:
         return Routed("memory_command", slots, "remember", m.group(1))
     correction = bool(re.match(r"^\s*(actually|sorry|correction|i meant|make it|change (it|that)|instead)\b", t))
-    if re.search(r"\bcancel\b", t) and not re.search(r"cancel that\b", t):
+    if re.search(r"\b(cancel|raddh|radd)\b", t) and not re.search(r"cancel that\b", t):
         return Routed("cancel", slots)
-    if re.search(r"\b(reschedule|move|shift|postpone|push)\b", t):
+    if re.search(r"\b(reschedule|move|shift|postpone|push|badlo|badal do|aage karo)\b", t):
         return Routed("reschedule", slots, is_correction=correction)
     if re.search(r"\b(same|again|last time|usual|previous)\b", t) and (slots.get("service") or "same" in t):
         return Routed("rebook_same_provider", slots, is_correction=correction)
     if correction and current_intent:
         return Routed(current_intent, slots, is_correction=True)
-    if slots.get("service") or re.search(r"\b(book|need|find|get me|looking for|search)\b", t):
+    if slots.get("service") or re.search(r"\b(book|need|find|get me|looking for|search|chahiye|chahie|dhundo|bulao)\b", t):
         if current_intent in ("new_booking", "rebook_same_provider", "reschedule") and not slots.get("service") \
                 and not re.search(r"\bbook\b", t):
             return Routed(current_intent, slots)
