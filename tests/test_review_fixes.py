@@ -217,3 +217,56 @@ def test_out_of_area_proposal_flagged_on_card(tmp_path):
     a, env, *_ = mk(tmp_path, script=[_search(), pick])
     out = a.handle_user_message(f"electrician in Indiranagar on {MON}")
     assert "Please approve" in out and "not Indiranagar" in out
+
+
+# ------------------------------------------------------------------ hold countdown, fingerprint, ranking, run summary
+def _book_world(tmp_path):
+    from evals.harness import MON, World, success_scenario
+    w = World(tmp_path, success_scenario())
+    w.say(f"electrician in Indiranagar on {MON}")
+    return w
+
+
+def test_card_shows_hold_countdown_and_fingerprint(tmp_path):
+    w = _book_world(tmp_path)
+    p = w.pending()
+    out = w.agent.store.turns(2)[-1]["content"]
+    assert "Slot held for 10 min" in out and p.card.fingerprint() in out
+    assert p.card.fingerprint() == "#" + p.hash[:4]
+    w.clock.advance(minutes=4)
+    assert p.hold_minutes_left(w.clock) == 6
+
+
+def test_rehold_when_under_two_minutes_left(tmp_path):
+    w = _book_world(tmp_path)
+    w.clock.advance(minutes=9, seconds=30)  # 30 s left on the hold, not yet expired
+    w.say("yes")
+    assert w.calls("hold_slot") == 2 and w.calls("book") == 1
+
+
+def test_no_rehold_with_plenty_of_time(tmp_path):
+    w = _book_world(tmp_path)
+    w.clock.advance(minutes=3)
+    w.say("yes")
+    assert w.calls("hold_slot") == 1 and w.calls("book") == 1
+
+
+def test_approval_check_event_logged_before_execution(tmp_path):
+    w = _book_world(tmp_path)
+    fp = w.pending().card.fingerprint()
+    w.say("yes")
+    evs = w.tracer._events
+    i = next(i for i, e in enumerate(evs) if e["type"] == "approval_check")
+    assert evs[i]["fingerprint"] == fp and evs[i]["match"] is True
+    assert i < next(i for i, e in enumerate(evs) if e["type"] == "tool_call" and e["name"] == "book")
+
+
+def test_ranking_event_and_run_summary(tmp_path):
+    w = _book_world(tmp_path)
+    r = w.events("ranking")[0]
+    assert r["uses_review_text"] is False and r["scores"]
+    assert {"price", "rating", "slot_fit", "prefs"} <= set(r["scores"][0])
+    line = w.agent.finish()
+    s = w.events("run_summary")[0]
+    assert line.startswith(f"{s['ai_calls']} AI calls, {s['tool_calls']} tool calls, {s['tokens']} tokens, ₹")
+    assert line.endswith(" s")

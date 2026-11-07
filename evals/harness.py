@@ -37,7 +37,8 @@ class Eval:
 
 class World:
     def __init__(self, tmp_path: Path, scenario: Scenario | None = None, script=None, memory: bool = True,
-                 limits: Limits | None = None, clock: FakeClock | None = None, persist: bool = False, timer=None):
+                 limits: Limits | None = None, clock: FakeClock | None = None, persist: bool = False, timer=None,
+                 ask_guesses: bool = False):
         self.tmp = Path(tmp_path)
         self.runs = self.tmp / "runs"
         self.dbpath = self.tmp / "world.db"
@@ -45,7 +46,7 @@ class World:
         self.conn = db.connect(self.dbpath if persist else ":memory:")
         self.scenario = scenario or Scenario(seed=1)
         self.memory_on = memory
-        self.limits, self.timer = limits, timer
+        self.limits, self.timer, self.ask_guesses = limits, timer, ask_guesses
         self.script = script
         self._boot(self.scenario, script)
 
@@ -61,7 +62,7 @@ class World:
         self.model = ScriptedModel(script)
         kw = {"timer": self.timer} if self.timer else {}
         self.agent = Agent(self.conn, self.env, self.model, self.clock, memory=self.mem, tracer=self.tracer,
-                           limits=self.limits, sleep=lambda s: None, **kw)
+                           limits=self.limits, sleep=lambda s: None, ask_guesses=self.ask_guesses, **kw)
 
     def restart(self, scenario: Scenario | None = None, script=None) -> None:
         """Simulate a process restart: new Agent/env/tracer objects over the same SQLite file."""

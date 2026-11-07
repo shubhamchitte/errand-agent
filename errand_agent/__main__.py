@@ -78,7 +78,7 @@ def build(db_path: str, scripted: bool, seed: int = 42, scenario: str | None = N
     if not mem.all(include_forgotten=True):
         seed_memories(mem)
     model = ScriptedModel() if scripted else default_model()
-    return Agent(conn, env, model, clock, memory=mem, tracer=tracer or Tracer(new_run_id()))
+    return Agent(conn, env, model, clock, memory=mem, tracer=tracer or Tracer(new_run_id()), ask_guesses=True)
 
 
 def slash_to_message(text: str) -> str | None:
@@ -114,6 +114,7 @@ def run_plain(agent: Agent) -> None:
                 print("unknown booking id")
             continue
         print("agent>", agent.handle_user_message(slash_to_message(text) or text))
+    print(agent.finish())
 
 
 def main(argv: list[str] | None = None) -> None:

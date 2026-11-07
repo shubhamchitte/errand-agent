@@ -85,11 +85,25 @@ def _compact(name: str, res: dict) -> dict:
     return res
 
 
+def _guess_phrase(value: str) -> str:
+    """'Probably prefers late morning slots' -> 'You seem to prefer late morning slots'."""
+    m = re.match(r"Probably (\w+)\s*(.*)", value)
+    if not m:
+        return "I'm guessing: " + value
+    verb, rest = m.groups()
+    if verb.endswith("s") and not verb.endswith("ss"):
+        return f"You seem to {verb[:-1]} {rest}".strip()
+    return f"You seem to be {verb} {rest}".strip()
+
+
 class Agent:
     def __init__(self, conn, env, model: Model, clock, user_id: str = "u_demo", memory=None, tracer=None,
-                 limits: Limits | None = None, timer=time.monotonic, recover: bool = True, sleep=time.sleep):
+                 limits: Limits | None = None, timer=time.monotonic, recover: bool = True, sleep=time.sleep,
+                 ask_guesses: bool = False):
         self.conn, self.env, self.model, self.clock, self.user_id = conn, env, model, clock, user_id
         self.memory = memory
+        self.ask_guesses = ask_guesses
+        self._t_start = time.monotonic()
         self._turn_usd = 0.0
         self.tracer = tracer if tracer is not None else _NullTracer()
         self.limits = limits or Limits()
@@ -99,6 +113,8 @@ class Agent:
         self.gate = ApprovalGate(conn, clock, user_id)
         self.executor = Executor(conn, clock, env, self.gate, user_id, self.tracer,
                                  on_user_cancel=self.store.mark_user_cancelled, timer=timer, sleep=sleep)
+        if hasattr(model, "tracer"):
+            model.tracer = self.tracer
         self.builder = ContextBuilder(memory, tracer=self.tracer)
         self.startup_messages: list[str] = []
         if recover:
@@ -127,6 +143,13 @@ class Agent:
         self.store.set_shown(active.action_id if active else None)
         return out
 
+    def finish(self) -> str:
+        """Emit the end-of-run summary event and return its one-line form."""
+        if not hasattr(self.tracer, "run_summary"):
+            return ""
+        from .trace import summary_line
+        return summary_line(self.tracer.run_summary(time.monotonic() - self._t_start))
+
     def poll_and_handle_events(self) -> list[str]:
         """Proactive follow-up, called between turns: provider cancellations -> notify -> replacement -> approval."""
         msgs = []
@@ -147,6 +170,21 @@ class Agent:
     def _handle(self, text: str) -> str:
         wf = self.store.load()
         pending = self.gate.active()
+        conf = wf.notes.pop("confirm", None) if self.memory is not None else None
+        if conf:
+            self.store.save(wf)
+            if is_affirmative(text) or is_negative(text):
+                yes = is_affirmative(text)
+                try:
+                    if yes:
+                        self.memory.confirm(conf["id"])
+                    else:
+                        self.memory.forget(conf["id"])
+                except Exception:
+                    pass
+                self.tracer.event("guess_answered", fact_id=conf["id"], remembered=yes)
+                ack = "Okay, I'll remember that." if yes else "Okay, I've dropped that guess."
+                return ack + "\n" + self._handle(conf["text"])
         if is_affirmative(text):
             if pending:
                 shown = self.store.shown()
@@ -175,7 +213,7 @@ class Agent:
         if r.intent in ACTION_INTENTS:
             terminal = wf.state in (S.DONE, S.FAILED, S.ESCALATED, S.IDLE)
             if (r.intent != wf.intent and not r.is_correction) or (terminal and not r.is_correction):
-                wf.slots, wf.notes = S.Slots(), {}
+                wf.slots, wf.notes = S.Slots(), {k: v for k, v in wf.notes.items() if k == "asked_guesses"}
             wf.intent = r.intent
         changed = wf.slots.merge(r.slots)
         if changed:
@@ -185,10 +223,36 @@ class Agent:
             self.tracer.event("approval_invalidated", action_id=pending.action_id, changed=changed)
         if wf.intent in ACTION_INTENTS:
             self._memory_defaults(wf)
+        if wf.intent in ACTION_INTENTS and not pending and self.ask_guesses:
+            q = self._guess_question(wf, text)
+            if q:
+                self.store.save(wf)
+                return q
         self.store.save(wf)
         if wf.intent in ACTION_INTENTS:
             self.store.transition(wf, S.GATHERING if wf.missing() else S.SEARCHING, f"intent={wf.intent}")
         return self._loop(text, wf, r.intent)
+
+    def _guess_question(self, wf: S.Workflow, text: str) -> str | None:
+        """If an unconfirmed inferred guess bears on this request, ask once, plainly. Never used until confirmed."""
+        if self.memory is None:
+            return None
+        sl = wf.slots
+        mem = wf.notes.get("from_memory", {})  # only what the user said counts, not defaults from memory
+        topics = {t for t in (sl.service, "time" if sl.earliest_time and "earliest_time" not in mem else None,
+                              "price" if sl.budget_inr and "budget_inr" not in mem else None) if t}
+        asked = wf.notes.setdefault("asked_guesses", [])
+        try:
+            cands = self.memory.guesses_to_confirm(topics, exclude=asked)
+        except Exception:
+            return None
+        if not cands:
+            return None
+        f = cands[0]
+        asked.append(f.id)
+        wf.notes["confirm"] = {"id": f.id, "text": text}
+        self.tracer.event("guess_question", fact_id=f.id, key=f.key)
+        return f"{_guess_phrase(f.value)}. Should I remember that?"
 
     def _memory_defaults(self, wf: S.Workflow) -> None:
         if self.memory is None:
@@ -385,7 +449,7 @@ class Agent:
             for w in warnings:
                 note += "\n" + w
             act = self.gate.propose(card, h["hold_id"], h["expires_at"])
-            note += f"\nI'm holding the slot until {h['expires_at'][11:16]}."
+            note += self._hold_note(act)
         else:
             bid = str(a.get("booking_id", ""))
             b = self._booking(bid)
@@ -400,10 +464,10 @@ class Agent:
             act = self.gate.propose(card)
             note = ""
         self.store.transition(wf, S.AWAITING_APPROVAL, f"proposed {card.type}")
-        self.tracer.event("pending_action", action_id=act.action_id, hash=act.hash, card=card.render())
+        self.tracer.event("pending_action", action_id=act.action_id, hash=act.hash, fingerprint=card.fingerprint(), card=card.render())
         why, fact_ids = self._why(wf, card)
         self.tracer.event("proposal_why", action_id=act.action_id, fact_ids=fact_ids, why=why)
-        rendered = f"Please approve: {card.friendly()}{note}\n{why}\nReply 'yes' to confirm or 'no' to cancel."
+        rendered = f"Please approve: {card.friendly()} ({card.fingerprint()}){note}\n{why}\nReply 'yes' to confirm or 'no' to cancel."
         return rendered, {"status": "proposed", "action_id": act.action_id}, rendered
 
     def _why(self, wf: S.Workflow, card: ActionCard) -> tuple[str, list[str]]:
@@ -450,6 +514,10 @@ class Agent:
         return "Why: " + ", ".join(parts) + ".", list(dict.fromkeys(i for i in ids if i))
 
     # ================================================================ approval + execution
+    def _hold_note(self, act) -> str:
+        n = act.hold_minutes_left(self.clock)
+        return f"\nSlot held for {n} min." if n is not None else ""
+
     def _approve(self, wf: S.Workflow, action_id: str | None = None) -> str:
         try:
             action = self.gate.authorize(True, action_id)
@@ -468,10 +536,11 @@ class Agent:
         if out.status == "reask" and out.new_card:
             new = self.gate.propose(out.new_card, out.hold["hold_id"], out.hold["expires_at"])
             self.store.transition(wf, S.AWAITING_APPROVAL, "re-ask after change")
-            self.tracer.event("pending_action", action_id=new.action_id, hash=new.hash, card=new.card.render())
+            self.tracer.event("pending_action", action_id=new.action_id, hash=new.hash, fingerprint=new.card.fingerprint(), card=new.card.render())
             why, fact_ids = self._why(wf, new.card)
             self.tracer.event("proposal_why", action_id=new.action_id, fact_ids=fact_ids, why=why)
-            return (f"{out.message}\nPlease approve: {new.card.friendly()}\n{why}\n"
+            return (f"{out.message}\nPlease approve: {new.card.friendly()} ({new.card.fingerprint()})"
+                    f"{self._hold_note(new)}\n{why}\n"
                     "Reply 'yes' to confirm or 'no' to cancel.")
         if out.status == "changed":
             self.store.transition(wf, S.FAILED, "action target changed since approval")
@@ -505,7 +574,7 @@ class Agent:
         self._remember_search(wf, res)
         cands = [p for p in res.get("providers", []) if p["provider_id"] != ev.get("provider_id")]
         ranked = rank(cands, {"budget_inr": wf.slots.budget_inr, "earliest_time": wf.slots.earliest_time},
-                      require_verified=True)
+                      require_verified=True, tracer=self.tracer)
         if not ranked:
             return "I couldn't find a replacement that fits your preferences. Want me to widen the search?"
         p, slot = ranked[0]

@@ -23,6 +23,7 @@ from .trace import sanitize as _sanitize
 
 EXECUTING, VERIFYING, DONE, FAILED, UNKNOWN = "EXECUTING", "VERIFYING", "DONE", "FAILED", "UNKNOWN"
 MAX_ATTEMPTS = 3
+HOLD_MIN_LEFT_MIN = 2 # re-hold before booking if less than this is left on the hold
 BACKOFF_BASE_S = 0.25
 UNVERIFIABLE = object()  # sentinel: status check failed, outcome unknown
 
@@ -100,6 +101,10 @@ class Executor:
         if action.status != A_EXEC:
             raise RuntimeError("executor called without gate authorization")
         self.deadline = deadline
+        ok = action.hash_ok()
+        self._event("approval_check", action_id=action.action_id, fingerprint=action.card.fingerprint(), match=ok)
+        if not ok:
+            return self._changed(action, "the approved card no longer matches what was stored")
         try:
             return self._execute(action)
         finally:
@@ -182,8 +187,9 @@ class Executor:
 
     def _prepare_hold(self, action: PendingAction) -> Outcome | None:
         """If the hold expired, re-hold; any change in price/slot invalidates approval (re-ask)."""
-        if action.hold_id and action.hold_expires_at and self.clock.iso() <= action.hold_expires_at:
-            return None
+        if action.hold_id and action.hold_expires_at and \
+                (action.hold_seconds_left(self.clock) or 0) >= HOLD_MIN_LEFT_MIN * 60:
+            return None  # still held with enough time left (otherwise re-hold first, below)
         if self._row(self.key_for(action)):
             return None  # already attempted under this key; never swap the hold mid-flight
         c = action.card

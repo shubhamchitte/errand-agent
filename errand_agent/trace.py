@@ -92,6 +92,14 @@ class Tracer:
         return self.event("tool_call", name=name, args=args, result_sanitized=result_sanitized,
                           latency_ms=latency_ms, error=error)
 
+    def run_summary(self, elapsed_s: float = 0.0) -> dict:
+        s = self.summary()
+        ev = self.event("run_summary", ai_calls=s["model_calls"], tool_calls=s["tool_calls"],
+                        tokens=s["input_tokens"] + s["output_tokens"], cost_inr=s["cost_inr"],
+                        seconds=round(elapsed_s, 1))
+        ev["line"] = summary_line(ev)
+        return ev
+
     def summary(self) -> dict:
         mc = [e for e in self._events if e["type"] == "model_call"]
         tc = [e for e in self._events if e["type"] == "tool_call"]
@@ -110,3 +118,8 @@ class Tracer:
             "tool_latency_ms": sum(e["latency_ms"] for e in tc),
             "state_transitions": sum(1 for e in self._events if e["type"] == "state_transition"),
         }
+
+
+def summary_line(ev: dict) -> str:
+    return (f"{ev['ai_calls']} AI calls, {ev['tool_calls']} tool calls, {ev['tokens']} tokens, "
+            f"\u20b9{ev['cost_inr']:.2f}, {ev['seconds']:.1f} s")

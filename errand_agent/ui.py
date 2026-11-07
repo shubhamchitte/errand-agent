@@ -73,8 +73,15 @@ def trace_items(events: list[dict], width: int) -> list[tuple[Any, int]]:
         elif t == "pending_action":
             card = [ln[: width - 4] for ln in str(e.get("card", "")).splitlines()][:10]
             body = Text("\n".join(card), style="bold")
-            out.append((Panel(body, title="APPROVAL CARD", border_style="bold yellow", style="on grey15", padding=(0, 1)),
+            out.append((Panel(body, title="APPROVAL CARD " + str(e.get("fingerprint", "")), border_style="bold yellow", style="on grey15", padding=(0, 1)),
                         len(card) + 2))
+        elif t == "approval_check":
+            line("bold green" if e.get("match") else "bold red",
+                 f"{ts} APPROVAL CHECK {e['fingerprint']} match={e['match']}")
+        elif t == "ranking":
+            line("cyan", f"{ts} RANKING {', '.join(e['order'])} (review text used: {e['uses_review_text']})")
+        elif t == "run_summary":
+            line("bold magenta", f"{ts} {e.get('line', '')}")
         elif t == "turn_cost":
             line("magenta", f"{ts} TURN COST ${e['cost_usd']:.4f} (₹{e['cost_inr']:.2f})")
         elif t == "approved":
@@ -178,6 +185,7 @@ def run_ui(db_path: str, scripted: bool, seed: int = 42, scenario: str | None = 
         out = box.get("out")
         for who, m in (out if isinstance(out, list) else [("agent", out)]):
             msgs.append((who, m))
+    console.print(agent.finish())
 
 
 def _job(agent: Agent, text: str, slash_to_message):

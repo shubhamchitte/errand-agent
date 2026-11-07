@@ -103,7 +103,7 @@ def _slot_ok(slot: str, sl: dict) -> bool:
     return True
 
 
-def heuristic_policy(ctx: Context, tools: list[dict]) -> ModelReply:
+def heuristic_policy(ctx: Context, tools: list[dict], tracer=None) -> ModelReply:
     """Deterministic stand-in for an LLM: drives real tool calls for each intent."""
     st, sl = ctx.state, ctx.state.get("slots", {})
     intent = st.get("intent")
@@ -134,7 +134,7 @@ def heuristic_policy(ctx: Context, tools: list[dict]) -> ModelReply:
         provs = [p for p in sr[-1].get("providers", []) if not want_pid or p["provider_id"] == want_pid]
         if want_pid:  # asking for a specific provider: area fit is irrelevant
             provs = [{**p, "in_requested_area": True} for p in provs]
-        cands = rank(provs, sl)
+        cands = rank(provs, sl, tracer=tracer)
         if not cands:
             return ModelReply(text="I couldn't find a provider matching all your constraints. Want me to relax the budget, time or dates?")
         p, slot = cands[0]
@@ -171,6 +171,7 @@ class ScriptedModel(Model):
         self.script = list(script or [])
         self.policy = policy
         self.seen: list[Context] = []
+        self.tracer = None  # set by Agent; lets the policy log its ranking
 
     def respond(self, context: Context, tools: list[dict]) -> ModelReply:
         self.seen.append(context)
@@ -178,7 +179,8 @@ class ScriptedModel(Model):
             item = self.script.pop(0)
             r = item(context, tools) if callable(item) else item
         elif self.policy:
-            r = self.policy(context, tools)
+            r = (self.policy(context, tools, tracer=self.tracer) if self.policy is heuristic_policy
+                 else self.policy(context, tools))
         else:
             r = ModelReply(text="(no scripted reply)")
         if not r.usage:

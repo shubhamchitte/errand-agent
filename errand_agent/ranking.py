@@ -33,7 +33,7 @@ def fitting_slots(slots, date_start=None, date_end=None, earliest_time=None) -> 
 
 
 def rank(providers: list[dict], slots: dict | None = None, preferred: set[str] | frozenset[str] = frozenset(),
-         require_verified: bool = False) -> list[tuple[dict, str]]:
+         require_verified: bool = False, tracer=None) -> list[tuple[dict, str]]:
     """Return [(provider, best_slot)] best first. ``slots`` is the user's slot dict (budget_inr, date_start,
     date_end, earliest_time)."""
     sl = slots or {}
@@ -51,4 +51,9 @@ def rank(providers: list[dict], slots: dict | None = None, preferred: set[str] |
                p["provider_id"] not in preferred, fit[0], p["provider_id"])
         ranked.append((key, p, fit[0]))
     ranked.sort(key=lambda r: r[0])
+    if tracer is not None:
+        tracer.event("ranking", uses_review_text=False, order=[p["provider_id"] for _, p, _ in ranked],
+                     scores=[{"provider_id": p["provider_id"], "price": p["price_inr"], "rating": p["rating"],
+                              "slot_fit": f"{'in' if p.get('in_requested_area', True) else 'out of'} area, {s}",
+                              "prefs": p["provider_id"] in preferred} for _, p, s in ranked])
     return [(p, s) for _, p, s in ranked]

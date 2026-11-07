@@ -14,7 +14,7 @@ def test_scenarios_build():
 def test_render_after_turn(tmp_path):
     tr = UITracer("ui", str(tmp_path))
     ag = build(str(tmp_path / "s.db"), True, tracer=tr)
-    out = ag.handle_user_message("Find me a plumber tomorrow evening under 1500")
+    out = ag.handle_user_message("Find me a plumber in Indiranagar tomorrow")
     assert out
     con = Console(width=140, height=40, record=True, file=open("/dev/null", "w"))
     con.print(render(con, ag, [("you", "hi"), ("agent", out)]))

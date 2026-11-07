@@ -127,6 +127,12 @@ class MemoryStore:
         sql = "SELECT * FROM memories WHERE user_id=?" + ("" if include_forgotten else " AND forgotten=0")
         return [_fact(r) for r in self.conn.execute(sql + " ORDER BY rowid_", (self.user_id,))]
 
+    def guesses_to_confirm(self, topics: set[str], exclude=()) -> list[Fact]:
+        """Unconfirmed inferred facts whose tags touch one of ``topics`` (e.g. the service, 'time', 'price').
+        These are never used or sent to the model; the agent may ask the user about them."""
+        return [f for f in self.all() if f.source == "inferred" and not f.confirmed
+                and f.id not in exclude and topics & set(f.tags)]
+
     def relevant(self, intent: str, service: str | None, slot_keys: list[str], limit: int) -> list[Fact]:
         """Deterministic: score = 3 per intent tag match + 3 service tag match
         + 2 per slot key matching a tag or fact key + 1 for 'global' tag (only if anything

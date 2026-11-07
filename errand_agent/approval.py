@@ -39,6 +39,10 @@ class ActionCard:
     def hash(self) -> str:
         return hashlib.sha256(self.canonical().encode()).hexdigest()
 
+    def fingerprint(self) -> str:
+        """Short visible ID of the exact card the user approves, e.g. '#a3f9'."""
+        return "#" + self.hash()[:4]
+
     def render(self) -> str:
         price = inr(self.price_inr)
         verb = {"book": "BOOK", "cancel": "CANCEL booking", "reschedule": "RESCHEDULE booking"}[self.type]
@@ -68,6 +72,17 @@ class PendingAction:
     hold_id: str | None = None
     hold_expires_at: str | None = None
     result: dict | None = None
+
+    def hold_seconds_left(self, clock: Clock) -> float | None:
+        if not self.hold_expires_at:
+            return None
+        from datetime import datetime
+        return (datetime.fromisoformat(self.hold_expires_at) - datetime.fromisoformat(clock.iso())).total_seconds()
+
+    def hold_minutes_left(self, clock: Clock) -> int | None:
+        """Whole minutes (rounded up) until the hold expires; None if there is no hold."""
+        s = self.hold_seconds_left(clock)
+        return None if s is None else max(0, -int(-s // 60))
 
     def hash_ok(self) -> bool:
         return self.card.hash() == self.hash
