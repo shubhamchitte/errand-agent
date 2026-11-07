@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: errand-agent
+Version: 0.1.0
+Summary: Chat-based errand agent with mocked home-service tools
+Requires-Python: >=3.12
+Requires-Dist: anthropic
+Requires-Dist: claude-agent-sdk
+Requires-Dist: rich
+Requires-Dist: pytest

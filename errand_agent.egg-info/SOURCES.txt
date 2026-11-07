@@ -1,0 +1,6 @@
+pyproject.toml
+errand_agent.egg-info/PKG-INFO
+errand_agent.egg-info/SOURCES.txt
+errand_agent.egg-info/dependency_links.txt
+errand_agent.egg-info/requires.txt
+errand_agent.egg-info/top_level.txt
