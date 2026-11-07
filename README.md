@@ -13,6 +13,8 @@ uv venv && source .venv/bin/activate
 uv pip install -e .            # or: python -m venv .venv && pip install -e .
 ```
 
+Shortcuts (a `Makefile` wraps everything below): `make setup` (venv + install), `make test`, `make evals`, `make demo` (offline, reset, `timeout_booked` scenario), `make demo-live`, `make sweep` (invariant sweep), `make trace` (regenerate the saved example trace).
+
 Offline demo (no network, no keys, deterministic):
 
 ```bash
@@ -76,6 +78,33 @@ Proactive demo: `/cancel-provider bk_seed_4`, then `/events`. The agent tells yo
                                                     mock tools
 ```
 
+### The workflow states
+
+Every request moves through these saved states (`errand_agent/state.py`). The model can only reach `EXECUTING` through your yes.
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> GATHERING: details missing
+    GATHERING --> SEARCHING: have service, area, date
+    IDLE --> SEARCHING
+    SEARCHING --> COMPARING: providers found
+    COMPARING --> AWAITING_APPROVAL: card shown
+    AWAITING_APPROVAL --> EXECUTING: you say yes
+    AWAITING_APPROVAL --> IDLE: you say no
+    EXECUTING --> VERIFYING: book timed out or unclear
+    VERIFYING --> DONE: status confirmed
+    EXECUTING --> DONE: confirmed
+    EXECUTING --> AWAITING_APPROVAL: price or slot changed, new card
+    EXECUTING --> FAILED: could not book
+    VERIFYING --> ESCALATED: cannot tell
+    DONE --> [*]
+    FAILED --> [*]
+    ESCALATED --> [*]
+```
+
+In one line: `IDLE -> GATHERING -> SEARCHING -> COMPARING -> AWAITING_APPROVAL -> (your yes) EXECUTING -> VERIFYING -> DONE`, with `FAILED` or `ESCALATED` as the exits when something goes wrong.
+
 The model only has read tools and "propose" tools. Booking, cancelling and rescheduling live in the executor, which the approval gate alone can reach. See [DESIGN.md](DESIGN.md) for details.
 
 ## What is real and what is mocked
@@ -119,7 +148,9 @@ python -m pytest            # 114 unit/integration tests
 python -m pytest evals      # 51 scenarios; regenerates EVAL_TABLE.md
 ```
 
-Both run offline in about a second. The evals drive the real agent loop with a scripted model, forced mock outcomes and a fake clock, and assert on outcomes and invariants (for example "no book call without a valid approval"), not on reply wording. Results are in [EVAL_TABLE.md](EVAL_TABLE.md), which the test run generates.
+Both run offline in about a second (`make test`, `make evals`).
+
+**Invariant sweep.** `make sweep` (or `python scripts/check_invariants.py 500`) runs 500 seeded random scenarios through the real loop (forced timeouts booked and not booked, slot taken, 503s, price drift, hold expiry, repeated yes, injection reviews, forgets, restarts) and checks: no book/cancel/reschedule without a matching approved card, no success claim before a verified status, at most one booking per provider and slot, context never over the cap, forgotten facts never sent to the model. `evals/test_invariants_sweep.py` runs 100 of them in pytest. Result: seeds 0-99 give `100 runs, 0 violations`; the 500-run sweep finds 1 violation (seed 252): after `what do you remember about me` and then `forget my dog`, the earlier memory listing stays in the chat history sent to the model, so the forgotten fact's text still reaches it. Listed in [BUGS.md](BUGS.md) terms as open. The evals drive the real agent loop with a scripted model, forced mock outcomes and a fake clock, and assert on outcomes and invariants (for example "no book call without a valid approval"), not on reply wording. Results are in [EVAL_TABLE.md](EVAL_TABLE.md), which the test run generates.
 
 ## Repo map
 
