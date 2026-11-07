@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS wf_exec(
   idempotency_key TEXT PRIMARY KEY, action_id TEXT, user_id TEXT, type TEXT, args TEXT, status TEXT,
   attempts INTEGER DEFAULT 0, result TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS wf_user_cancelled(booking_id TEXT PRIMARY KEY, ts TEXT);
+CREATE TABLE IF NOT EXISTS wf_shown(user_id TEXT PRIMARY KEY, action_id TEXT, ts TEXT);
 """
 
 
@@ -164,6 +165,16 @@ class WorkflowStore:
         rs = db.rows(self.conn, "SELECT role, content FROM wf_turns WHERE user_id=? ORDER BY id DESC LIMIT ?",
                      (self.user_id, limit))
         return list(reversed(rs))
+
+    # ---------------------------------------------- card last shown to the user
+    def set_shown(self, action_id: str | None) -> None:
+        """Record the approval card that was visible in the latest assistant reply (None = no card)."""
+        self.conn.execute("INSERT OR REPLACE INTO wf_shown VALUES(?,?,?)", (self.user_id, action_id, self.clock.iso()))
+        self.conn.commit()
+
+    def shown(self) -> str | None:
+        r = db.one(self.conn, "SELECT action_id FROM wf_shown WHERE user_id=?", (self.user_id,))
+        return r["action_id"] if r else None
 
     def mark_user_cancelled(self, booking_id: str) -> None:
         self.conn.execute("INSERT OR IGNORE INTO wf_user_cancelled VALUES(?,?)", (booking_id, self.clock.iso()))

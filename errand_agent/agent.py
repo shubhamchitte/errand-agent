@@ -7,22 +7,54 @@ pending action's hash. Consequential tools are called only by Executor.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
+from datetime import date, timedelta
 from dataclasses import dataclass
 
 from . import state as S
 from .approval import DONE as A_DONE, ActionCard, ApprovalGate, DECLINED, GateError
 from .context import ContextBuilder, wrap_untrusted
 from .executor import Executor, call_tool
-from .mocks import ToolError, ToolTimeout, TransientError
+from .mocks import TOOL_SCHEMAS, ToolError, ToolTimeout, TransientError
 from .mocks import data as mock_data
 from .models import AGENT_TOOL_NAMES, AGENT_TOOLS, Model, ToolCall
-from .router import extract_slots, is_affirmative, is_negative, route
+from .router import _area, _time, is_affirmative, is_negative, route
 
 ACTION_INTENTS = ("new_booking", "reschedule", "cancel", "rebook_same_provider")
-# memory keys whose values seed empty slots (documented, deterministic)
-MEMORY_SLOT_KEYS = {"earliest": "earliest_time", "budget.typical": "budget_inr", "area.locality": "area"}
+
+
+def parse_earliest(v: str) -> str | None:
+    """'Not before 10am ...' -> '10:00'."""
+    t = (v or "").lower()
+    got = _time(t)
+    if got:
+        return got
+    m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", t)
+    return _time(f"after {m.group(0)}") if m else None
+
+
+def parse_inr(v: str) -> int | None:
+    """'Usually spends up to Rs 1500 ...' -> 1500 (only an amount tagged with a currency marker)."""
+    m = re.search(r"(?:₹|\brs\.?|\binr)\s*(\d[\d,]*)", (v or "").lower())
+    return int(m.group(1).replace(",", "")) if m else None
+
+
+def parse_area(v: str) -> str | None:
+    return _area((v or "").lower())
+
+
+# Explicit memory-key -> (slot, parser) table. Only these exact keys seed empty slots; nothing is matched by
+# substring, so e.g. a forgotten/old key such as 'old.earliest_start' can never fill a slot.
+MEMORY_SLOT_MAP: dict[str, tuple[str, object]] = {
+    "pref.earliest_start": ("earliest_time", parse_earliest),
+    "budget.typical_visit": ("budget_inr", parse_inr),
+    "area.locality": ("area", parse_area),
+}
+
+
+_SCHEMAS = {t["name"]: t for t in TOOL_SCHEMAS}
 
 
 @dataclass
@@ -52,16 +84,17 @@ def _compact(name: str, res: dict) -> dict:
 
 class Agent:
     def __init__(self, conn, env, model: Model, clock, user_id: str = "u_demo", memory=None, tracer=None,
-                 limits: Limits | None = None, timer=time.monotonic, recover: bool = True):
+                 limits: Limits | None = None, timer=time.monotonic, recover: bool = True, sleep=time.sleep):
         self.conn, self.env, self.model, self.clock, self.user_id = conn, env, model, clock, user_id
         self.memory = memory
         self.tracer = tracer if tracer is not None else _NullTracer()
         self.limits = limits or Limits()
         self.timer = timer
+        self.sleep = sleep
         self.store = S.WorkflowStore(conn, clock, user_id, self.tracer)
         self.gate = ApprovalGate(conn, clock, user_id)
         self.executor = Executor(conn, clock, env, self.gate, user_id, self.tracer,
-                                 on_user_cancel=self.store.mark_user_cancelled)
+                                 on_user_cancel=self.store.mark_user_cancelled, timer=timer, sleep=sleep)
         self.builder = ContextBuilder(memory, tracer=self.tracer)
         self.startup_messages: list[str] = []
         if recover:
@@ -83,6 +116,9 @@ class Agent:
             reply = "Something went wrong on my side and I stopped. Nothing new was booked, cancelled or changed."
         out = "\n\n".join([*notices, reply]) if notices else reply
         self.store.add_turn("assistant", out)
+        # bind approval to what the user has actually SEEN: the card active when this reply was shown
+        active = self.gate.active()
+        self.store.set_shown(active.action_id if active else None)
         return out
 
     def poll_and_handle_events(self) -> list[str]:
@@ -107,7 +143,15 @@ class Agent:
         pending = self.gate.active()
         if is_affirmative(text):
             if pending:
-                return self._approve(wf)
+                shown = self.store.shown()
+                if shown != pending.action_id:
+                    # e.g. a proactive event superseded the card between the user's view and their "yes"
+                    self.tracer.event("gate_refused", reason="approval not for the card last shown",
+                                      shown=shown, pending=pending.action_id)
+                    return ("Your 'yes' was for an earlier request that has since changed, so I did nothing. "
+                            f"Please review this one:\nPlease approve: {pending.card.render()}\n"
+                            "Reply 'yes' to confirm or 'no' to cancel.")
+                return self._approve(wf, shown)
             latest = self.gate.latest()
             if latest and latest.status == A_DONE:
                 return f"That's already done - nothing more to do. ({latest.card.render()}; result verified earlier.)"
@@ -149,16 +193,16 @@ class Agent:
             return
         filled = {}
         for f in facts:
-            for prefix, slot in MEMORY_SLOT_KEYS.items():
-                if prefix in f.key and getattr(wf.slots, slot) is None and slot not in filled:
-                    v = extract_slots(f.value.replace("Rs", "rs"), self.clock.now()).get(slot)
-                    if slot == "budget_inr" and v is None:
-                        import re
-                        m = re.search(r"(\d{3,6})", f.value)
-                        v = int(m.group(1)) if m else None
-                    if v is not None:
-                        filled[slot] = v
-                        wf.notes.setdefault("from_memory", {})[slot] = f.id
+            spec = MEMORY_SLOT_MAP.get(f.key)
+            if not spec:
+                continue
+            slot, parser = spec
+            if getattr(wf.slots, slot) is not None or slot in filled:
+                continue
+            v = parser(f.value)
+            if v is not None:
+                filled[slot] = v
+                wf.notes.setdefault("from_memory", {})[slot] = f.id
         if filled:
             wf.slots.merge(filled)
             self.tracer.event("slots_from_memory", filled=filled)
@@ -186,6 +230,7 @@ class Agent:
             st = self._state_dict(wf)
             st["turn_intent"] = turn_intent
             ctx = self.builder.build(st, history, text, scratch)
+            self.tracer.context(ctx)
             m0 = self.timer()
             reply = self.model.respond(ctx, AGENT_TOOLS)
             u = reply.usage or {}
@@ -230,21 +275,66 @@ class Agent:
         if call.name == "list_bookings":
             args = {"user_id": self.user_id}
         res = self._read(call.name, args)
+        if call.name == "search_providers" and res.get("status") == "ok":
+            self._remember_search(wf, res)
         if call.name == "search_providers" and wf.state in (S.SEARCHING, S.GATHERING):
             self.store.transition(wf, S.COMPARING, "search results")
         return wrap_untrusted(call.name, json.dumps(_compact(call.name, res), ensure_ascii=False)), res, None
 
     def _read(self, name: str, args: dict) -> dict:
+        schema = _SCHEMAS.get(name)
+        if schema is not None:  # validate model-supplied args instead of catching TypeError from the call
+            props = schema["input_schema"].get("properties", {})
+            args = {k: v for k, v in args.items() if k in props}
+            missing = [k for k in schema["input_schema"].get("required", []) if k not in args]
+            if missing:
+                return {"status": "error", "message": f"{name}: missing required argument(s): {', '.join(missing)}"}
         for attempt in range(3):
             try:
                 return call_tool(self.env, self.tracer, name, **args)
             except TransientError:
+                if attempt < 2:
+                    self.sleep(0.1 * 2 ** attempt)  # bounded exponential backoff
                 continue
             except ToolTimeout:
                 return {"status": "error", "message": f"{name} timed out"}
-            except (ToolError, TypeError) as e:
+            except ToolError as e:
                 return {"status": "error", "message": str(e)}
         return {"status": "error", "message": f"{name} unavailable (503)"}
+
+    @staticmethod
+    def _remember_search(wf: S.Workflow, res: dict) -> None:
+        wf.notes["last_search"] = {p["provider_id"]: {"slots": list(p.get("available_slots", [])), "area": p.get("area"),
+                                                      "service": p.get("service"), "price_inr": p.get("price_inr")}
+                                   for p in res.get("providers", [])}
+
+    def _check_proposal(self, wf: S.Workflow, pid: str, slot: str) -> tuple[str | None, list[str]]:
+        """Validate a model-proposed booking against current search results and the user's constraints.
+        Returns (refusal reason or None, warnings to show on the card)."""
+        found = (wf.notes.get("last_search") or {}).get(pid)
+        sl = wf.slots
+        if found is None:
+            return f"provider {pid} is not in the current search results; search first", []
+        if slot not in found["slots"]:
+            return f"slot {slot} is not an available slot for {pid} in the current search results", []
+        if sl.service and found.get("service") and found["service"] != sl.service:
+            return f"provider {pid} offers {found['service']}, not {sl.service}", []
+        if sl.earliest_time and slot[11:16] < sl.earliest_time:
+            return f"slot {slot} is earlier than the user's earliest time {sl.earliest_time}", []
+        if sl.date_start and (slot[:10] < sl.date_start or slot[:10] > (sl.date_end or sl.date_start)):
+            return f"slot {slot} is outside the requested dates {sl.date_start}..{sl.date_end or sl.date_start}", []
+        warn = []
+        if sl.area and found.get("area") and found["area"].lower() != sl.area.lower():
+            warn.append(f"Warning: this provider is in {found['area']}, not your requested area {sl.area}.")
+        return None, warn
+
+    def _existing_booking(self, pid: str, slot: str, service: str | None) -> tuple[dict | None, list[dict]]:
+        """(confirmed booking with same provider+slot, confirmed bookings of the same service on the same day)."""
+        lb = self._read("list_bookings", {"user_id": self.user_id})
+        conf = [b for b in lb.get("bookings", []) if b.get("status") == "confirmed"]
+        same = next((b for b in conf if b["provider_id"] == pid and b["slot"] == slot), None)
+        sameday = [b for b in conf if b["slot"][:10] == slot[:10] and service and b.get("service") == service]
+        return same, sameday
 
     def _booking(self, booking_id: str) -> dict | None:
         lb = self._read("list_bookings", {"user_id": self.user_id})
@@ -261,6 +351,19 @@ class Agent:
             if not p:
                 r = {"status": "error", "message": f"unknown provider {pid}"}
                 return json.dumps(r), r, None
+            why, warnings = self._check_proposal(wf, pid, slot)
+            if why:
+                self.tracer.event("proposal_refused", provider_id=pid, slot=slot, reason=why)
+                r = {"status": "error", "message": "proposal refused: " + why}
+                return json.dumps(r), r, None
+            same, sameday = self._existing_booking(pid, slot, p["service"])
+            if same:
+                r = {"status": "error", "message": f"the user already has confirmed booking {same['booking_id']} with "
+                                                   f"{pid} at {slot}; do not book it again"}
+                return json.dumps(r), r, None
+            for b in sameday:
+                warnings.append(f"Note: you already have booking {b['booking_id']} for {b['service'].replace('_', ' ')} "
+                                f"on {b['slot']} with {b['provider_name']}.")
             h = self._read("hold_slot", {"provider_id": pid, "slot": slot})
             if h.get("status") != "held":
                 return json.dumps(h), h, None
@@ -271,6 +374,8 @@ class Agent:
                          "when I held the slot.")
             if wf.slots.budget_inr and h["quoted_price"] > wf.slots.budget_inr:
                 note += f"\nWarning: this is above your budget of ₹{wf.slots.budget_inr}."
+            for w in warnings:
+                note += "\n" + w
             act = self.gate.propose(card, h["hold_id"], h["expires_at"])
             note += f"\n(Slot held until {h['expires_at'][11:16]}.)"
         else:
@@ -292,9 +397,9 @@ class Agent:
         return rendered, {"status": "proposed", "action_id": act.action_id}, rendered
 
     # ================================================================ approval + execution
-    def _approve(self, wf: S.Workflow) -> str:
+    def _approve(self, wf: S.Workflow, action_id: str | None = None) -> str:
         try:
-            action = self.gate.authorize(True)
+            action = self.gate.authorize(True, action_id)
         except GateError as e:
             self.tracer.event("gate_refused", reason=str(e))
             return f"I can't execute that ({e}). Nothing was done."
@@ -302,7 +407,7 @@ class Agent:
         if wf.state != S.AWAITING_APPROVAL:
             self.store.transition(wf, S.AWAITING_APPROVAL, "pending action restored")
         self.store.transition(wf, S.EXECUTING, f"user approved {action.type}")
-        out = self.executor.execute(action)
+        out = self.executor.execute(action, deadline=self.timer() + self.limits.wall_clock_s)
         self.tracer.event("execution", status=out.status, result=out.result)
         if out.status == "done":
             self.store.transition(wf, S.DONE, out.message)
@@ -312,6 +417,12 @@ class Agent:
             self.store.transition(wf, S.AWAITING_APPROVAL, "re-ask after change")
             self.tracer.event("pending_action", action_id=new.action_id, hash=new.hash, card=new.card.render())
             return f"{out.message}\nPlease approve: {new.card.render()}\nReply 'yes' to confirm or 'no' to cancel."
+        if out.status == "changed":
+            self.store.transition(wf, S.FAILED, "action target changed since approval")
+            return out.message
+        if out.status == "duplicate":
+            self.store.transition(wf, S.DONE, "duplicate booking refused")
+            return out.message
         if out.status == "conflict":
             wf.notes["alternatives"] = out.alternatives
             wf.slots.slot = None
@@ -332,10 +443,10 @@ class Agent:
         self._memory_defaults(wf)
         if wf.slots.area is None:
             wf.slots.area = mock_data.BY_ID.get(ev.get("provider_id"), {}).get("area")
-        from datetime import date, timedelta
         end = (date.fromisoformat(day) + timedelta(days=2)).isoformat()
         res = self._read("search_providers", {"service": ev["service"], "area": wf.slots.area,
                                                "date_range": {"start": day, "end": end}})
+        self._remember_search(wf, res)
         best = None
         for p in res.get("providers", []):
             if p["provider_id"] == ev.get("provider_id") or not (p.get("attributes") or {}).get("verified", True):
@@ -353,6 +464,7 @@ class Agent:
         wf.slots.date_end = end
         current = self.store.load()
         current.intent, current.slots, current.notes = "new_booking", wf.slots, {"replacing": ev["booking_id"],
+                                                                                 "last_search": wf.notes.get("last_search", {}),
                                                                                  **({"from_memory": wf.notes["from_memory"]} if wf.notes.get("from_memory") else {})}
         self.store.save(current)
         content, _, card = self._propose(ToolCall("propose_booking", {"provider_id": p["provider_id"], "slot": slot}), current)

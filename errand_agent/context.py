@@ -17,6 +17,7 @@ from .tokens import count_tokens
 TOKEN_CAP = 4000
 MEMORY_LIMIT = 15
 MEMORY_TOKEN_SHARE = 0.25
+ELIDED = "[omitted: over context cap]"
 
 SYSTEM_PROMPT = """You are an errand agent that books home services (plumber, electrician, AC servicing) in Bengaluru.
 Rules:
@@ -115,6 +116,28 @@ class ContextBuilder:
         ctx.tokens = self.measure(ctx)
         while ctx.tokens > self.cap and len(ctx.messages) > 1:  # safety net: estimator overheads
             ctx.messages.pop(0)
+            ctx.tokens = self.measure(ctx)
+        # hard cap: the 40-token floor per tool result (and call args) can still exceed it with a large scratch.
+        # Elide oldest scratch payloads, then drop memory facts, then hard-truncate the current message.
+        for s in ctx.scratch:
+            if ctx.tokens <= self.cap:
+                break
+            if s["kind"] == "result" and s["content"] != ELIDED:
+                s["content"] = ELIDED
+            elif s["kind"] == "call" and s.get("args"):
+                s["args"] = {}
+            ctx.tokens = self.measure(ctx)
+        while ctx.tokens > self.cap and len(ctx.scratch) > 2:  # still over: drop oldest call/result entries
+            ctx.scratch.pop(0)
+            while len(ctx.scratch) > 2 and ctx.scratch[0]["kind"] != "call":
+                ctx.scratch.pop(0)
+            ctx.tokens = self.measure(ctx)
+        if ctx.tokens > self.cap and mem_lines:
+            ctx.system = self.system + "\n\n" + state_txt
+            ctx.fact_ids = []
+            ctx.tokens = self.measure(ctx)
+        if ctx.tokens > self.cap:
+            cur["content"] = _truncate_to(cur["content"], max(1, count_tokens(cur["content"]) - (ctx.tokens - self.cap)))
             ctx.tokens = self.measure(ctx)
         ctx.hash = hashlib.sha256((ctx.system + "\n" + ctx.render()).encode()).hexdigest()[:16]
         return ctx

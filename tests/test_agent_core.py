@@ -29,6 +29,7 @@ def mk(tmp_path, scenario=None, script=None, conn=None, memory=True, limits=None
         if not mem.all(include_forgotten=True):
             seed_memories(mem)
     tr = Tracer("t", tmp_path / "runs")
+    kw.setdefault("sleep", lambda s: None)
     a = Agent(conn, env, ScriptedModel(script), clock, memory=mem, tracer=tr, limits=limits, **kw)
     return a, env, conn, clock
 
@@ -100,7 +101,9 @@ def test_book_requires_user_yes(tmp_path):
 
 
 def test_model_cannot_approve_or_call_consequential_tools(tmp_path):
-    script = [ModelReply(tool_calls=[ToolCall("book", {"hold_id": "hold_0001", "idempotency_key": "x"}),
+    script = [ModelReply(tool_calls=[ToolCall("search_providers", {"service": "electrician", "area": "Indiranagar",
+                                                                   "date_range": {"start": MON, "end": MON}})]),
+              ModelReply(tool_calls=[ToolCall("book", {"hold_id": "hold_0001", "idempotency_key": "x"}),
                                      ToolCall("cancel", {"booking_id": "bk_seed_4", "idempotency_key": "y"}),
                                      ToolCall("hold_slot", {"provider_id": "p_elc_1", "slot": f"{MON}T10:00"})]),
               ModelReply(tool_calls=[ToolCall("propose_booking", {"provider_id": "p_elc_1", "slot": f"{MON}T10:00",

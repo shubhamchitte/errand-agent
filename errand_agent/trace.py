@@ -14,6 +14,7 @@ PRICES: dict[str, tuple[float, float]] = {
     "scripted": (0.0, 0.0),
     "claude-sonnet": (3.0, 15.0),
     "claude-haiku": (0.8, 4.0),
+    "claude-opus": (15.0, 75.0),
     "default": (3.0, 15.0),
 }
 MAX_STR = 200
@@ -58,6 +59,17 @@ class Tracer:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(ev, sort_keys=False) + "\n")
         return ev
+
+    def context(self, ctx) -> Path:
+        """Write the FULL rendered model input for one model call to a sidecar JSONL
+        (``<run_id>.context.jsonl``), unsanitized and untruncated, so evals can assert on the actual payload."""
+        p = self.dir / f"{self.run_id}.context.jsonl"
+        rec = {"run_id": self.run_id, "hash": ctx.hash, "tokens": ctx.tokens, "fact_ids": list(ctx.fact_ids),
+               "system": _SECRET_VAL.sub("[REDACTED]", ctx.system),
+               "rendered": _SECRET_VAL.sub("[REDACTED]", ctx.render())}
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        return p
 
     def state_transition(self, frm: str, to: str, reason: str = "") -> dict:
         return self.event("state_transition", frm=frm, to=to, reason=reason)

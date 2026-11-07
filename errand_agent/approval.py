@@ -2,7 +2,8 @@
 
 The model can only *propose*; code builds a canonical PendingAction card and its hash.
 Execution requires (a) an affirmative USER reply, (b) addressed to the latest pending
-action, (c) whose recomputed hash equals the stored hash. Nothing the model says counts.
+action that was actually shown to the user, (c) not expired, (d) whose stored card still matches its hash
+(tamper check only - real-world freshness is re-checked by the Executor). Nothing the model says counts.
 """
 from __future__ import annotations
 
@@ -16,7 +17,8 @@ from . import db
 from .clock import Clock
 
 PENDING, EXECUTING, DONE, FAILED = "PENDING", "EXECUTING", "DONE", "FAILED"
-INVALIDATED, SUPERSEDED, DECLINED = "INVALIDATED", "SUPERSEDED", "DECLINED"
+INVALIDATED, SUPERSEDED, DECLINED, EXPIRED = "INVALIDATED", "SUPERSEDED", "DECLINED", "EXPIRED"
+APPROVAL_TTL_MIN = 30  # a PENDING card older than this (e.g. from an old session) can no longer be approved
 ACTION_TYPES = ("book", "cancel", "reschedule")
 
 
@@ -122,6 +124,11 @@ class ApprovalGate:
             raise GateError("no pending action")
         if action_id is not None and action_id != a.action_id:
             raise GateError("approval is not for the latest pending action")
+        if self._expired(a):
+            self.set_status(a.action_id, EXPIRED, {"reason": "approval card too old"})
+            raise GateError("this approval request has expired; please ask again")
+        # NOTE: this hash check only detects tampering with the stored card between proposal and approval.
+        # Freshness against the real world is checked at execution time by Executor._precheck / _prepare_hold.
         if not a.hash_ok():
             self.set_status(a.action_id, INVALIDATED, {"reason": "hash mismatch"})
             raise GateError("action card changed since it was shown")
@@ -133,6 +140,14 @@ class ApprovalGate:
             raise GateError("action already claimed")
         a.status = EXECUTING
         return a
+
+    def _expired(self, a: PendingAction) -> bool:
+        r = db.one(self.conn, "SELECT created_at FROM wf_pending WHERE action_id=?", (a.action_id,))
+        if not r or not r["created_at"]:
+            return False
+        from datetime import datetime, timedelta
+        return datetime.fromisoformat(r["created_at"]) + timedelta(minutes=APPROVAL_TTL_MIN) < \
+            datetime.fromisoformat(self.clock.iso())
 
     def in_flight(self) -> list[PendingAction]:
         return [self._row_to(r) for r in db.rows(self.conn, "SELECT * FROM wf_pending WHERE user_id=? AND status=?",

@@ -27,3 +27,21 @@ Template per entry: **What broke** / **Why** / **Fix** / **Regression test**.
 - **Why:** the model only saw the persisted workflow intent, not what the current message was about, so an unrelated message re-ran the booking flow.
 - **Fix:** the context state now carries `turn_intent`; on small talk with a pending approval the policy reminds the user of the pending card instead of re-proposing. The replacement search also skips unverified providers.
 - **Regression test:** `::test_provider_cancellation_replacement_needs_approval` (asserts the pending card is not the cancelling provider after "hi").
+
+## Context could exceed the token cap with many tool results
+- **What broke:** `ContextBuilder.build()` returned a context of ~7.8k tokens against a 4k cap when the turn had hundreds of small tool calls/results.
+- **Why:** truncation kept a 40-token floor per tool result and the final safety net only popped conversation history, never scratch entries or memory.
+- **Fix:** after history trimming, elide oldest tool payloads, then drop oldest call/result entries, then drop memory facts, then truncate the current message, until `tokens <= cap`.
+- **Regression test:** `tests/test_review_fixes.py::test_cap_enforced_with_large_scratch`.
+
+## "yes" could approve a card the user never saw
+- **What broke:** a provider-cancellation event polled at the start of the user's "yes" turn proposed a replacement card B, superseding card A; the "yes" (meant for A) then approved B.
+- **Why:** `authorize()` approved whatever was latest PENDING, and events were handled before the message.
+- **Fix:** the action id of the card visible in each assistant reply is persisted (`wf_shown`); an affirmative only authorizes that id, otherwise the new card is shown and nothing runs.
+- **Regression test:** `tests/test_review_fixes.py::test_yes_cannot_approve_card_created_by_event_before_it_was_shown`.
+
+## Executor ignored the wall-clock budget and retried without backoff
+- **What broke:** a 503 storm during book/cancel retried back-to-back with no delay and no time limit (the agent's `wall_clock_s` only applied to the model loop).
+- **Why:** `Executor` had no deadline or sleep.
+- **Fix:** `execute(action, deadline=...)` with exponential backoff capped by the remaining time; on deadline the row goes UNKNOWN / workflow ESCALATED with an explicit "ran out of time, nothing confirmed" message.
+- **Regression test:** `tests/test_review_fixes.py::test_executor_respects_deadline_with_backoff`.

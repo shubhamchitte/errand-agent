@@ -5,7 +5,7 @@
 * ScriptedModel: deterministic (scripted replies and/or a heuristic policy) for offline tests/evals;
   its tool calls go through exactly the same agent loop as a live model's.
 * ClaudeAgentModel: claude-agent-sdk (auth via CLAUDE_CODE_OAUTH_TOKEN, Claude Pro plan). The SDK's
-  own tools are disabled; the model answers in a JSON envelope that we parse into tool calls.
+  own tools are disabled; our tools are native SDK MCP tools whose tool_use blocks become ToolCalls.
 * AnthropicAPIModel: native tool use via the anthropic SDK when ANTHROPIC_API_KEY is set.
 """
 from __future__ import annotations
@@ -193,16 +193,14 @@ class ScriptedModel(Model):
 
 
 # ------------------------------------------------------------------ live adapters
-ENVELOPE_INSTRUCTIONS = """
-You act only by replying with ONE JSON object and nothing else:
-{"text": "<message to the user, may be empty>", "tool_calls": [{"name": "<tool>", "args": {...}}]}
-Available tools (JSON schema):
-%s
-Call tools when you need data; when you have tool results, answer or propose. Use an empty tool_calls list to finish.
-"""
+MCP_SERVER = "errand"
+MCP_PREFIX = f"mcp__{MCP_SERVER}__"
+_DEFERRED = ("Tool call recorded. The errand agent executes it (with approval gating) and returns the result in "
+             "the next request; stop here.")
 
 
 def parse_envelope(raw: str) -> tuple[str, list[ToolCall]]:
+    """Legacy text-envelope parser (kept only as a fallback for plain-text replies; not used for tool calls)."""
     m = re.search(r"\{.*\}", raw or "", re.S)
     if not m:
         return (raw or "").strip(), []
@@ -214,35 +212,76 @@ def parse_envelope(raw: str) -> tuple[str, list[ToolCall]]:
     return str(obj.get("text") or ""), calls
 
 
-class ClaudeAgentModel(Model):
-    """claude-agent-sdk adapter (uses CLAUDE_CODE_OAUTH_TOKEN; Sonnet by default; single turn, no built-in tools)."""
+def model_cost(model: str, input_tokens: int, output_tokens: int, reported: float | None = None) -> float:
+    """Cost in USD: the provider-reported figure when present, else the PRICES table estimate."""
+    from .trace import estimate_cost
+    if reported is not None:
+        return float(reported)
+    return estimate_cost(model, int(input_tokens or 0), int(output_tokens or 0))
 
-    def __init__(self, model: str | None = None):
+
+class ClaudeAgentModel(Model):
+    """claude-agent-sdk adapter (auth via CLAUDE_CODE_OAUTH_TOKEN; Sonnet by default).
+
+    Uses NATIVE tool calls: our agent tools are exposed as in-process SDK MCP tools
+    (``create_sdk_mcp_server``); all Claude Code built-in tools are disabled (``tools=[]``) and only our MCP tools
+    are allowed. ``max_turns=1`` bounds each call to one model step: tool_use blocks are captured and returned as
+    ToolCalls so the agent loop (limits, approval gate, tracing) executes them - the MCP handler never touches
+    the environment.
+    """
+
+    def __init__(self, model: str | None = None, max_turns: int = 1):
         self.name = model or os.environ.get("ERRAND_MODEL", "claude-sonnet-4-5")
+        self.max_turns = max_turns
+
+    def build_options(self, context: Context, tools: list[dict]):
+        from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server
+        from claude_agent_sdk import SdkMcpTool
+
+        async def _deferred(_args):
+            return {"content": [{"type": "text", "text": _DEFERRED}]}
+
+        sdk_tools = [SdkMcpTool(t["name"], t["description"], t["input_schema"], _deferred) for t in tools]
+        server = create_sdk_mcp_server(MCP_SERVER, tools=sdk_tools)
+        return ClaudeAgentOptions(system_prompt=context.system, model=self.name, max_turns=self.max_turns, tools=[],
+                                  allowed_tools=[MCP_PREFIX + t["name"] for t in tools],
+                                  mcp_servers={MCP_SERVER: server}, strict_mcp_config=True, setting_sources=[])
+
+    def collect(self, messages) -> ModelReply:
+        """Turn SDK messages into a ModelReply (pure; unit-tested with constructed SDK message objects)."""
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
+        text, calls, usage, reported = "", [], {}, None
+        for msg in messages:
+            if isinstance(msg, AssistantMessage):
+                for b in msg.content:
+                    if isinstance(b, TextBlock):
+                        text += b.text
+                    elif isinstance(b, ToolUseBlock):
+                        name = b.name[len(MCP_PREFIX):] if b.name.startswith(MCP_PREFIX) else b.name
+                        calls.append(ToolCall(name, dict(b.input or {}), b.id))
+            elif isinstance(msg, ResultMessage):
+                usage, reported = msg.usage or {}, msg.total_cost_usd
+                if not text and not calls and msg.result:
+                    text = msg.result
+        it = int(usage.get("input_tokens", 0) or 0) + int(usage.get("cache_read_input_tokens", 0) or 0) \
+            + int(usage.get("cache_creation_input_tokens", 0) or 0)
+        ot = int(usage.get("output_tokens", 0) or 0)
+        return ModelReply(text.strip(), calls, {"model": self.name, "input_tokens": it, "output_tokens": ot,
+                                                "cost_usd": model_cost(self.name, it, ot, reported)})
 
     def respond(self, context: Context, tools: list[dict]) -> ModelReply:
         import anyio
-        from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, query
+        from claude_agent_sdk import query
 
-        system = context.system + ENVELOPE_INSTRUCTIONS % json.dumps(tools, separators=(",", ":"))
-        opts = ClaudeAgentOptions(system_prompt=system, model=self.name, max_turns=1, tools=[], allowed_tools=[],
-                                  setting_sources=[])
-        out: dict[str, Any] = {"text": "", "usage": {}, "cost": None}
+        opts = self.build_options(context, tools)
+        msgs: list = []
 
         async def run():
             async for msg in query(prompt=context.render(), options=opts):
-                if isinstance(msg, AssistantMessage):
-                    out["text"] += "".join(b.text for b in msg.content if isinstance(b, TextBlock))
-                elif isinstance(msg, ResultMessage):
-                    out["usage"], out["cost"] = msg.usage or {}, msg.total_cost_usd
-                    if not out["text"] and msg.result:
-                        out["text"] = msg.result
+                msgs.append(msg)
 
         anyio.run(run)
-        text, calls = parse_envelope(out["text"])
-        u = out["usage"]
-        return ModelReply(text, calls, {"model": self.name, "input_tokens": u.get("input_tokens", 0),
-                                        "output_tokens": u.get("output_tokens", 0), "cost_usd": out["cost"]})
+        return self.collect(msgs)
 
 
 class AnthropicAPIModel(Model):
@@ -275,7 +314,8 @@ class AnthropicAPIModel(Model):
         text = "".join(b.text for b in r.content if b.type == "text")
         calls = [ToolCall(b.name, dict(b.input), b.id) for b in r.content if b.type == "tool_use"]
         return ModelReply(text, calls, {"model": self.name, "input_tokens": r.usage.input_tokens,
-                                        "output_tokens": r.usage.output_tokens, "cost_usd": None})
+                                        "output_tokens": r.usage.output_tokens,
+                                        "cost_usd": model_cost(self.name, r.usage.input_tokens, r.usage.output_tokens)})
 
 
 def default_model() -> Model:
