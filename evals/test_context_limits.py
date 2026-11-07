@@ -18,6 +18,7 @@ UNCONFIRMED_TEXT = ["Probably pays by UPI", "Probably wants the same AC tech aga
 # ------------------------------------------------------------------ memory
 @sc(category="memory correction", expected="corrected earliest-start is used for the slot and sent to the model; the superseded value never is")
 def test_memory_correction(tmp_path, ev):
+    """A user correction replaces the stored fact instead of adding a conflicting one."""
     w = World(tmp_path, success_scenario())
     w.mem.correct("pref.earliest_start", "Not before 11am on any day; never schedule visits earlier than 11:00")
     w.say(f"electrician in Indiranagar on {MON}")
@@ -30,6 +31,7 @@ def test_memory_correction(tmp_path, ev):
 
 @sc(category="memory correction", expected="in-chat correction of a slot changes only that field, invalidates the old card and does not re-ask")
 def test_in_chat_correction_changes_one_field(tmp_path, ev):
+    """A mid-chat correction changes only the named field and keeps the rest."""
     w = World(tmp_path)
     w.say(f"I need a plumber in Indiranagar on {MON} under 1500")
     before, first = w.slots(), w.pending()
@@ -45,6 +47,7 @@ def test_in_chat_correction_changes_one_field(tmp_path, ev):
 
 @sc(category="memory forgetting", expected="after 'forget my dog' the fact is flagged forgotten and its text is absent from every later model payload; it was present before")
 def test_memory_forgetting(tmp_path, ev):
+    """Forgotten facts are no longer used or shown to the model."""
     w = World(tmp_path)
     w.say(f"electrician in Indiranagar on {MON}")
     n_before = len(w.payloads())
@@ -64,6 +67,7 @@ def test_memory_forgetting(tmp_path, ev):
 
 @sc(category="memory forgetting", expected="forgotten facts stay out of payloads and out of slot defaults across a process restart")
 def test_forgotten_survives_restart(tmp_path, ev):
+    """A forgotten fact stays forgotten after a process restart."""
     w = World(tmp_path, persist=True)
     w.say("forget old.earliest_start")                      # already forgotten at seed -> no-op, must not revive
     w.mem.forget("pref.earliest_start")
@@ -77,6 +81,7 @@ def test_forgotten_survives_restart(tmp_path, ev):
 # ------------------------------------------------------------------ context budget
 @sc(category="context budget", expected="50+ memories and a 200+ turn history: every model payload is <= the token cap, no forgotten/unconfirmed-inferred text in any payload, relevant prefs present")
 def test_context_budget_and_filtering(tmp_path, ev):
+    """Model context stays under budget and is filtered to what the request needs."""
     w = World(tmp_path)
     w.seed_history(3)
     n_mem = len(w.mem.all(include_forgotten=True))
@@ -100,6 +105,7 @@ def test_context_budget_and_filtering(tmp_path, ev):
 
 @sc(category="context budget", expected="irrelevant personal memories (diet, hobbies, travel...) never reach the model for a booking; fact_ids logged per call match the sidecar")
 def test_context_only_relevant_memories(tmp_path, ev):
+    """Only memories relevant to the request are put in the context."""
     w = World(tmp_path)
     w.say(f"plumber in Indiranagar on {MON}")
     recs = w.payloads()
@@ -114,6 +120,7 @@ def test_context_only_relevant_memories(tmp_path, ev):
 
 @sc(category="context budget", expected="a 40k-char user message plus huge tool results still yields payloads <= cap (hard cap held)")
 def test_context_cap_under_huge_inputs(tmp_path, ev):
+    """Huge tool outputs are truncated so context size stays bounded."""
     script = [reply(call("get_provider", provider_id="p_plm_2")), reply(call("list_bookings", user_id="u_demo")),
               reply(call("get_provider", provider_id="p_elc_2")), reply(text="ok")]
     w = World(tmp_path, script=script)
@@ -132,6 +139,7 @@ def _spin():
 
 @sc(category="limit exhaustion", expected="endless model tool-calling stops at max_model_turns; limit_exit logged; nothing booked or changed")
 def test_limit_model_turns(tmp_path, ev):
+    """The loop stops cleanly at the model-turn cap."""
     w = World(tmp_path, script=[_spin()] * 50, limits=Limits(max_model_turns=3, max_tool_calls=99))
     before = w.snapshot()
     w.say("hello")
@@ -142,6 +150,7 @@ def test_limit_model_turns(tmp_path, ev):
 
 @sc(category="limit exhaustion", expected="too many tool calls in one turn stops at max_tool_calls; the (N+1)th call is never executed")
 def test_limit_tool_calls(tmp_path, ev):
+    """The loop stops cleanly at the tool-call cap."""
     many = reply(*[call("list_bookings", user_id="u_demo") for _ in range(6)])
     w = World(tmp_path, script=[many] * 5, limits=Limits(max_model_turns=99, max_tool_calls=4))
     w.say("hello")
@@ -152,6 +161,7 @@ def test_limit_tool_calls(tmp_path, ev):
 
 @sc(category="limit exhaustion", expected="wall-clock budget exhausted: loop exits before another model call, nothing booked")
 def test_limit_wall_clock(tmp_path, ev):
+    """The loop stops cleanly when the wall-clock budget is exceeded."""
     ticks = iter(range(0, 100000, 50))
     w = World(tmp_path, script=[_spin()] * 50, limits=Limits(wall_clock_s=120), timer=lambda: next(ticks))
     w.say("hello")
@@ -162,6 +172,7 @@ def test_limit_wall_clock(tmp_path, ev):
 
 @sc(category="limit exhaustion", expected="wall clock expires while the executor is retrying a failing book: stops, never claims success, row not DONE")
 def test_limit_wall_clock_during_execution(tmp_path, ev):
+    """A timeout during execution leaves state consistent and is reported honestly."""
     sc_ = Scenario(seed=1)
     for n in range(1, 10):
         sc_.force("book", n, "transient_error")
@@ -178,6 +189,7 @@ def test_limit_wall_clock_during_execution(tmp_path, ev):
 # ------------------------------------------------------------------ headline prompts
 @sc(category="headline prompts", expected="'plumber, Monday morning, under Rs 1500': proposal is a plumber, morning, <=1500, >=10:00 (memory), in Indiranagar; nothing booked before yes; one booking after")
 def test_headline_plumber_mornings_under_1500(tmp_path, ev):
+    """Plumber, mornings, under 1500: results respect the budget and time window."""
     w = World(tmp_path, success_scenario())
     w.say(f"Find me a plumber in Indiranagar on {MON} morning under ₹1500")
     c = w.pending().card
@@ -192,6 +204,7 @@ def test_headline_plumber_mornings_under_1500(tmp_path, ev):
 
 @sc(category="headline prompts", expected="'move my AC servicing to Saturday': reschedule card for bk_seed_4 on the Saturday, >=10:00; moves only after yes; no new booking")
 def test_headline_move_ac_to_saturday(tmp_path, ev):
+    """Moving the AC booking to Saturday needs approval and ends in one moved booking."""
     w = World(tmp_path)
     w.say("Move my AC servicing to Saturday")
     c = w.pending().card
@@ -204,6 +217,7 @@ def test_headline_move_ac_to_saturday(tmp_path, ev):
 
 @sc(category="headline prompts", expected="'same electrician as last time, not before 10am': proposes p_elc_1 (past booking provider) at >=10:00; booked once after yes")
 def test_headline_same_electrician_not_before_10(tmp_path, ev):
+    """Rebooking the same electrician honours the not-before-10:00 constraint."""
     w = World(tmp_path, success_scenario())
     w.say("book the same electrician as last time, not before 10am")
     c = w.pending().card

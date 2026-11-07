@@ -18,8 +18,6 @@
 - *SQLite, soft deletes, polling for events.* Simple and restart-safe, not built for scale.
 - *Fail closed.* When unsure, it stops and says "nothing was changed" instead of guessing.
 
-**Why this matters to me.** Handing real decisions, and eventually real money, to an assistant only works if people can trust it. For that, a calm "you're not double-charged" has to be a fact the code can prove, not a nice sentence from a model. I built the errand version first because the shape is the same: ask, propose, get a yes, act once, verify, say what happened.
-
 ## Annotated trace excerpt
 
 From `traces/e2e_timeout_after_success.jsonl` (trimmed). The scripted model runs the real loop; the mock's `book` times out but did book.

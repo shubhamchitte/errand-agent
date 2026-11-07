@@ -16,6 +16,7 @@ def _search_result(w):
 
 @sc(category="neutral ranking", expected="injected / sponsored / 5-star-spam review text and flags on a provider never change the ranking order or the proposed provider")
 def test_injected_or_sponsored_review_cannot_change_ranking(tmp_path, ev):
+    """Injected or sponsored reviews do not alter provider ranking."""
     w = World(tmp_path, success_scenario())
     provs = _search_result(w)
     base = [(p["provider_id"], s) for p, s in rank(provs, {"date_start": MON, "date_end": MON})]
@@ -40,6 +41,7 @@ def test_injected_or_sponsored_review_cannot_change_ranking(tmp_path, ev):
 
 @sc(category="hinglish / terse input", expected="'kal subah plumber chahiye, 1500 tak' -> plumber, tomorrow, budget 1500; card within budget; 'haan kar do' books once")
 def test_hinglish_new_booking(tmp_path, ev):
+    """A Hinglish booking request is understood and still goes through approval."""
     w = World(tmp_path, success_scenario())
     w.clock.advance(days=1)  # Sun 8 Nov: "kal" = Mon 9 Nov (Sundays are closed in the mock)
     w.say("kal subah plumber chahiye, 1500 tak")
@@ -53,6 +55,7 @@ def test_hinglish_new_booking(tmp_path, ev):
 
 @sc(category="hinglish / terse input", expected="'AC service shanivar ko shift karo' -> reschedule of the AC booking to Saturday; nothing moves until 'haan'")
 def test_hinglish_reschedule(tmp_path, ev):
+    """A Hinglish reschedule request is routed to reschedule with the right booking."""
     w = World(tmp_path)
     before = w.snapshot()
     w.say("AC service shanivar ko shift karo")
@@ -66,6 +69,7 @@ def test_hinglish_reschedule(tmp_path, ev):
 
 @sc(category="hinglish / terse input", expected="Hinglish 'nahi' declines a card, 'raddh karo' proposes a cancel, 'mat karo' never approves; nothing changes without a clear yes")
 def test_hinglish_decline_and_cancel(tmp_path, ev):
+    """Hinglish decline and cancel phrases are read correctly and nothing is booked on a no."""
     w = World(tmp_path)
     before = w.snapshot()
     w.say("AC service raddh karo")
@@ -81,6 +85,7 @@ def test_hinglish_decline_and_cancel(tmp_path, ev):
 
 @sc(category="memory transparency", expected="'what do you know about me' lists explicit facts and unconfirmed guesses in separate sections; forgotten facts are gone; no state change")
 def test_memory_show_separates_explicit_and_inferred(tmp_path, ev):
+    """Memory display labels stated preferences apart from inferred ones."""
     w = World(tmp_path)
     before = w.snapshot()
     out = w.say("what do you know about me?")
@@ -99,6 +104,7 @@ def test_memory_show_separates_explicit_and_inferred(tmp_path, ev):
 
 @sc(category="memory transparency", expected="every proposal card carries a 'Why:' line; cited fact ids are real, explicit-or-confirmed, not forgotten, and logged in the trace")
 def test_why_line_cites_preference_facts(tmp_path, ev):
+    """The 'why' line cites only saved facts that exist in memory."""
     w = World(tmp_path, success_scenario())
     out = w.say(f"electrician in Indiranagar on {MON}")
     why = [l for l in out.splitlines() if l.startswith("Why:")]

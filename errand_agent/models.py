@@ -216,10 +216,10 @@ def model_cost(model: str, input_tokens: int, output_tokens: int, reported: floa
 
 
 class ClaudeAgentModel(Model):
-    """claude-agent-sdk adapter (auth via CLAUDE_CODE_OAUTH_TOKEN; Sonnet by default).
+    """claude-agent-sdk adapter (auth via CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY; Sonnet by default).
 
     Uses NATIVE tool calls: our agent tools are exposed as in-process SDK MCP tools
-    (``create_sdk_mcp_server``); all Claude Code built-in tools are disabled (``tools=[]``) and only our MCP tools
+    (``create_sdk_mcp_server``); the SDK's built-in tools are disabled (``tools=[]``) and only our MCP tools
     are allowed. ``max_turns=1`` bounds each call to one model step: tool_use blocks are captured and returned as
     ToolCalls so the agent loop (limits, approval gate, tracing) executes them - the MCP handler never touches
     the environment.

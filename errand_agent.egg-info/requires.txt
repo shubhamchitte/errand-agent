@@ -1,4 +1,0 @@
-anthropic
-claude-agent-sdk
-rich
-pytest

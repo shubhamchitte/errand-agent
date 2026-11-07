@@ -30,7 +30,7 @@ export CLAUDE_CODE_OAUTH_TOKEN=...       # or put it in a .env file
 python -m errand_agent --reset
 ```
 
-If `ANTHROPIC_API_KEY` is set it is used first; otherwise the OAuth token. With neither set, the CLI exits and tells you to use `--scripted`. A `.env` file in the current directory is read for these.
+If `ANTHROPIC_API_KEY` is set it is used first; otherwise the OAuth token. With neither set, the CLI exits and tells you to use `--scripted`. A `.env` file in the current directory is read for these. `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) uses a Claude subscription; `ANTHROPIC_API_KEY` uses API billing.
 
 Try these prompts:
 
@@ -139,7 +139,7 @@ errand_agent/
   mocks/        the provider tools
 tests/          unit and integration tests
 evals/          scenario evals; writes EVAL_TABLE.md
-scripts/make_e2e_trace.py   regenerates the raw trace in traces/
+scripts/make_e2e_trace.py   regenerates traces/e2e_timeout_after_success.jsonl
 ```
 
 ## Limits, and what I'd do next
@@ -159,3 +159,11 @@ Next:
 - Spending limits: a per-action and per-day cap enforced in code, with extra confirmation above it.
 - A proper audit log: append-only, one line per approval and money-affecting call, kept apart from debug traces.
 - A larger set of recorded live-model runs to replay in the evals.
+
+## Why this matters to me
+
+Handing real decisions, and eventually real money, to an assistant only works if people can trust it. For that, a calm "you're not double-charged" has to be a fact the code can prove, not a nice sentence from a model. I built the errand version first because the shape is the same: ask, propose, get a yes, act once, verify, say what happened.
+
+## Extras
+
+- Demo video: <link>

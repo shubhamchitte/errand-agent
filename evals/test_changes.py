@@ -12,6 +12,7 @@ sc = pytest.mark.scenario
 # ------------------------------------------------------------------ changed after approval
 @sc(category="price changed after approval", expected="hold expires, re-quote differs: no book call, old card INVALIDATED, new card needs fresh yes, booked at the new price")
 def test_price_changed_after_approval(tmp_path, ev):
+    """If the price changes after approval, the stale approval is not used and the user is re-asked."""
     w = World(tmp_path, success_scenario())
     w.say(f"electrician in Indiranagar on {MON}")
     first = w.pending()
@@ -28,6 +29,7 @@ def test_price_changed_after_approval(tmp_path, ev):
 
 @sc(category="price changed after approval", expected="user declines the re-quoted price: nothing is ever booked")
 def test_price_changed_then_declined(tmp_path, ev):
+    """After a price change, declining books nothing."""
     w = World(tmp_path, success_scenario())
     w.say(f"electrician in Indiranagar on {MON}")
     w.clock.advance(minutes=11)
@@ -41,6 +43,7 @@ def test_price_changed_then_declined(tmp_path, ev):
 
 @sc(category="slot changed after approval", expected="slot is taken between approval and execution: no book call, nothing booked, no success claimed")
 def test_slot_taken_after_approval(tmp_path, ev):
+    """If the slot is taken after approval, no booking is made and alternatives are offered."""
     w = World(tmp_path, success_scenario())
     w.say(f"electrician in Indiranagar on {MON}")
     card = w.pending().card
@@ -53,6 +56,7 @@ def test_slot_taken_after_approval(tmp_path, ev):
 
 @sc(category="slot changed after approval", expected="book call returns slot_taken after approval: failure reported, no booking row, state FAILED")
 def test_slot_taken_at_book_time(tmp_path, ev):
+    """A slot_taken result at book time is reported without a false success."""
     w = World(tmp_path, Scenario(seed=1).force("book", 1, "slot_taken"))
     w.say(f"electrician in Indiranagar on {MON}")
     w.say("yes")
@@ -63,6 +67,7 @@ def test_slot_taken_at_book_time(tmp_path, ev):
 
 @sc(category="slot changed after approval", expected="booking cancelled by provider after the user saw a cancel card: stale approval executes nothing")
 def test_booking_changed_after_cancel_card(tmp_path, ev):
+    """If the booking changed after a cancel card was shown, the cancel is not executed on stale data."""
     w = World(tmp_path)
     w.say("cancel my AC servicing booking")
     w.env.emit_provider_cancellation("bk_seed_4")
@@ -75,6 +80,7 @@ def test_booking_changed_after_cancel_card(tmp_path, ev):
 # ------------------------------------------------------------------ timeouts
 @sc(category="timeout after success", expected="book times out but WAS booked: verified via status, exactly 1 book call and 1 booking, no re-book")
 def test_timeout_after_success_booked(tmp_path, ev):
+    """A book timeout that actually booked is verified and reported as booked, not retried."""
     w = World(tmp_path, Scenario(seed=1).force("book", 1, "timeout_booked"))
     w.say(f"electrician in Indiranagar on {MON}")
     w.say("yes")
@@ -86,6 +92,7 @@ def test_timeout_after_success_booked(tmp_path, ev):
 
 @sc(category="timeout after success", expected="book times out and was NOT booked: verified absent, retried with the SAME idempotency key, exactly one booking")
 def test_timeout_not_booked(tmp_path, ev):
+    """A book timeout that did not book is verified and retried once safely."""
     w = World(tmp_path, Scenario(seed=1).force("book", 1, "timeout_not_booked").force("book", 2, "success"))
     w.say(f"electrician in Indiranagar on {MON}")
     w.say("yes")
@@ -96,6 +103,7 @@ def test_timeout_not_booked(tmp_path, ev):
 
 @sc(category="timeout after success", expected="book timed out AND status check keeps failing: never claims success, row UNKNOWN, workflow ESCALATED, no blind re-book")
 def test_timeout_unverifiable(tmp_path, ev):
+    """If a timeout cannot be verified, the agent says so and does not claim success or rebook."""
     sc_ = Scenario(seed=1).force("book", 1, "timeout_booked")
     for n in range(1, 10):
         sc_.force("get_booking_status", n, "timeout")
@@ -110,6 +118,7 @@ def test_timeout_unverifiable(tmp_path, ev):
 # ------------------------------------------------------------------ slot conflict
 @sc(category="slot conflict", expected="reschedule conflict: alternatives offered, none auto-picked, fresh approval required, then rescheduled once")
 def test_slot_conflict_on_reschedule(tmp_path, ev):
+    """A reschedule conflict leaves the original booking intact."""
     bad = "2026-11-11T15:00"
     w = World(tmp_path, Scenario(seed=1, conflict_slots={bad}))
     w.say(f"reschedule my AC servicing to {bad}")
@@ -132,6 +141,7 @@ def test_slot_conflict_on_reschedule(tmp_path, ev):
 # ------------------------------------------------------------------ tool failures
 @sc(category="tool failure", expected="cancel 503 once: retried with the same key, cancelled exactly once")
 def test_cancel_503_then_ok(tmp_path, ev):
+    """A transient 503 on cancel is retried and the cancel happens once."""
     w = World(tmp_path)
     w.say("cancel my AC servicing booking")
     w.say("yes")
@@ -142,6 +152,7 @@ def test_cancel_503_then_ok(tmp_path, ev):
 
 @sc(category="tool failure", expected="cancel keeps returning 503: bounded retries, booking stays confirmed, no success claimed, state FAILED")
 def test_cancel_persistent_503(tmp_path, ev):
+    """A persistent 503 on cancel is reported as not done; the booking stays."""
     sc_ = Scenario(seed=1)
     for n in range(1, 8):
         sc_.force("cancel", n, "transient_error")
@@ -156,6 +167,7 @@ def test_cancel_persistent_503(tmp_path, ev):
 
 @sc(category="tool failure", expected="search_providers 503s twice: read is retried with backoff and the flow still reaches an approval card")
 def test_read_tool_transient_failure_retried(tmp_path, ev):
+    """Transient read-tool failures are retried and the task still completes."""
     sc_ = Scenario(seed=1).force("search_providers", 1, "transient_error").force("search_providers", 2, "transient_error")
     w = World(tmp_path, sc_)
     w.say(f"electrician in Indiranagar on {MON}")
@@ -165,6 +177,7 @@ def test_read_tool_transient_failure_retried(tmp_path, ev):
 
 @sc(category="tool failure", expected="search_providers times out for good: user gets an honest dead end, no proposal, nothing booked")
 def test_read_tool_down(tmp_path, ev):
+    """A read tool that stays down ends in an honest failure message with no writes."""
     sc_ = Scenario(seed=1)
     for n in range(1, 10):
         sc_.force("search_providers", n, "timeout")
@@ -178,6 +191,7 @@ def test_read_tool_down(tmp_path, ev):
 # ------------------------------------------------------------------ restart / recovery
 @sc(category="restart mid-booking", expected="process dies after book succeeded but before the reply: restart verifies by key, reports it, no second book call")
 def test_restart_after_book_succeeded_before_reply(tmp_path, ev):
+    """After a crash post-booking, recovery finds the booking and does not double book."""
     w = World(tmp_path, success_scenario(), persist=True)
     w.say(f"electrician in Indiranagar on {MON}")
     orig = w.env.call
@@ -202,6 +216,7 @@ def test_restart_after_book_succeeded_before_reply(tmp_path, ev):
 
 @sc(category="restart mid-booking", expected="process dies after approval but before the key was persisted: restart executes nothing and tells the user")
 def test_restart_before_key_persisted(tmp_path, ev):
+    """A crash before the idempotency key was saved does not cause a duplicate booking."""
     w = World(tmp_path, success_scenario(), persist=True)
     w.say(f"electrician in Indiranagar on {MON}")
     w.agent.executor.execute = lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt())
@@ -216,6 +231,7 @@ def test_restart_before_key_persisted(tmp_path, ev):
 
 @sc(category="restart mid-booking", expected="restart while a card is pending: approval survives, one yes books once")
 def test_restart_with_pending_approval(tmp_path, ev):
+    """A pending approval survives restart and can still be confirmed once."""
     w = World(tmp_path, Scenario(seed=1).force("book", 1, "success"), persist=True)
     w.say(f"electrician in Indiranagar on {MON}")
     pid = w.pending().action_id
@@ -236,6 +252,7 @@ def _booked_electrician(tmp_path, n_success=2):
 
 @sc(category="proactive cancellation", expected="provider cancels: user told without prompting, replacement within preferences (not the cancelling provider, >=10:00), NOT booked until a fresh yes")
 def test_proactive_cancellation_replacement(tmp_path, ev):
+    """A provider-side cancellation triggers a replacement proposal that still needs approval."""
     w, bid = _booked_electrician(tmp_path)
     w.env.emit_provider_cancellation(bid)
     out = w.say("hi")
@@ -250,6 +267,7 @@ def test_proactive_cancellation_replacement(tmp_path, ev):
 
 @sc(category="proactive cancellation", expected="user's 'yes' was meant for an older card; a provider-cancel event superseded it: that yes books nothing")
 def test_proactive_yes_meant_for_old_card(tmp_path, ev):
+    """A yes meant for an old card is not applied to the new proactive card."""
     w = World(tmp_path, success_scenario(2))
     w.say(f"electrician in Indiranagar on {MON}")
     old = w.pending()
@@ -267,6 +285,7 @@ def test_proactive_yes_meant_for_old_card(tmp_path, ev):
 
 @sc(category="proactive cancellation", expected="no replacement offered when the user already cancelled that booking themselves (no notification)")
 def test_proactive_no_notice_for_user_cancel(tmp_path, ev):
+    """A user-initiated cancel does not raise a proactive provider-cancel notice."""
     w = World(tmp_path)
     w.say("cancel my AC servicing booking"); w.say("yes")
     w.env.emit_provider_cancellation("bk_seed_4")

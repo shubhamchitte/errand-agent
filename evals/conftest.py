@@ -32,7 +32,8 @@ def pytest_runtest_makereport(item, call):
     e = item.funcargs.get("ev")
     if e is not None:
         _ROWS[:] = [r for r in _ROWS if r["id"] != item.nodeid]
-        note = e.notes_text
+        doc = (item.function.__doc__ or "").strip().splitlines()
+        note = " ".join(filter(None, [doc[0] if doc else "", e.notes_text]))
         if not rep.passed:
             tail = str(call.excinfo.value).strip().splitlines()[:1] if call.excinfo else []
             note = (note + " | " if note else "") + "FAILED: " + (tail[0][:140] if tail else "error")
