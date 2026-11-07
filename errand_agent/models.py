@@ -134,7 +134,7 @@ def heuristic_policy(ctx: Context, tools: list[dict], tracer=None) -> ModelReply
         provs = [p for p in sr[-1].get("providers", []) if not want_pid or p["provider_id"] == want_pid]
         if want_pid:  # asking for a specific provider: area fit is irrelevant
             provs = [{**p, "in_requested_area": True} for p in provs]
-        cands = rank(provs, sl, tracer=tracer)
+        cands = rank(provs, sl)
         if not cands:
             return ModelReply(text="I couldn't find a provider matching all your constraints. Want me to relax the budget, time or dates?")
         p, slot = cands[0]

@@ -270,3 +270,36 @@ def test_ranking_event_and_run_summary(tmp_path):
     s = w.events("run_summary")[0]
     assert line.startswith(f"{s['ai_calls']} AI calls, {s['tool_calls']} tool calls, {s['tokens']} tokens, ₹")
     assert line.endswith(" s")
+
+
+def test_ranking_logged_and_sorted_for_non_scripted_model(tmp_path):
+    from errand_agent.models import ModelReply, ToolCall
+    from evals.harness import MON, World
+    seen = {}
+
+    def look(ctx, tools):
+        seen["ctx"] = ctx
+        return ModelReply(text="ok")
+    script = [ModelReply(tool_calls=[ToolCall("search_providers", {"service": "electrician", "area": "Indiranagar",
+                                                                    "date_range": {"start": MON, "end": MON}})]), look]
+    w = World(tmp_path, script=script)
+    w.agent.model.policy = None  # no heuristic policy: only the script drives the model
+    w.say(f"electrician in Indiranagar on {MON}")
+    r = w.events("ranking")
+    assert len(r) == 1 and r[0]["uses_review_text"] is False
+    res = [x for x in seen["ctx"].render().split("provider_id")[1:]]
+    order = [s.split('"')[2] for s in res]
+    assert order[: len(r[0]["order"])] == r[0]["order"]
+
+
+def test_forgotten_fact_scrubbed_from_history(tmp_path):
+    from evals.harness import World
+    w = World(tmp_path)
+    w.seed_history(1)
+    w.say("what do you remember about me")
+    dog = next(f for f in w.mem.all() if "dog" in f.value.lower())
+    assert dog.value in w.agent.store.turns(5)[-1]["content"]  # listing is in chat history
+    w.say(f"forget {dog.key}")
+    assert w.mem.get(dog.key).forgotten
+    w.say("electrician in Indiranagar tomorrow")
+    assert dog.value not in w.payload_text()

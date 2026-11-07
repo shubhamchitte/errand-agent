@@ -52,3 +52,10 @@ Each entry: what broke, why, the fix, and the test that now guards it. The first
 - **What broke:** the scripted model and the proactive-replacement path each had their own copy of the sort key, so they could drift apart. Nothing said, or tested, which inputs may affect the order. Review text or a "sponsored" flag was one careless edit away from leaking in.
 - **Fix:** one `errand_agent/ranking.py` (price, rating, slot fit and the user's preferences only; order documented in the file), used by both paths.
 - **Regression test:** `evals/test_quality.py::test_injected_or_sponsored_review_cannot_change_ranking`.
+
+### Forgotten memory fact kept being sent to the model through chat history
+- **What broke:** the user said "what do you remember about me", then "forget my dog". The earlier listing stayed in the chat history, so the forgotten fact ("Has a dog (Bruno)...") was still sent to the model in every later payload.
+- **Why:** forgetting only removed the fact from the memory store and from the "relevant facts" block. The history turns are raw text and were passed through unchanged.
+- **How found:** the randomized invariant sweep (`scripts/check_invariants.py`, seed 252), invariant "forgotten facts never appear in a model payload".
+- **Fix:** `ContextBuilder` replaces the values of forgotten facts in history with "[forgotten]" before building the payload.
+- **Regression test:** `tests/test_review_fixes.py::test_forgotten_fact_scrubbed_from_history`.

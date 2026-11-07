@@ -113,8 +113,6 @@ class Agent:
         self.gate = ApprovalGate(conn, clock, user_id)
         self.executor = Executor(conn, clock, env, self.gate, user_id, self.tracer,
                                  on_user_cancel=self.store.mark_user_cancelled, timer=timer, sleep=sleep)
-        if hasattr(model, "tracer"):
-            model.tracer = self.tracer
         self.builder = ContextBuilder(memory, tracer=self.tracer)
         self.startup_messages: list[str] = []
         if recover:
@@ -348,10 +346,18 @@ class Agent:
             args = {"user_id": self.user_id}
         res = self._read(call.name, args)
         if call.name == "search_providers" and res.get("status") == "ok":
+            self._rank_results(wf, res)
             self._remember_search(wf, res)
         if call.name == "search_providers" and wf.state in (S.SEARCHING, S.GATHERING):
             self.store.transition(wf, S.COMPARING, "search results")
         return wrap_untrusted(call.name, json.dumps(_compact(call.name, res), ensure_ascii=False)), res, None
+
+    def _rank_results(self, wf: S.Workflow, res: dict) -> None:
+        """Rank in shared code (any model): log the ranking trace and sort what the model sees the same way."""
+        provs = res.get("providers") or []
+        ranked = [p for p, _ in rank(provs, wf.slots.to_dict(), tracer=self.tracer)]
+        ids = {p["provider_id"] for p in ranked}
+        res["providers"] = ranked + [p for p in provs if p["provider_id"] not in ids]
 
     def _read(self, name: str, args: dict) -> dict:
         schema = _SCHEMAS.get(name)

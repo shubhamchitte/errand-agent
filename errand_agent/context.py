@@ -97,9 +97,21 @@ class ContextBuilder:
         used += mem_used
         system = system + "\n\n" + state_txt
 
-        # 3. recent turns, newest first
+        # 3. recent turns, newest first. Values of forgotten facts are scrubbed: an earlier memory listing or
+        # "forgot X" reply stays in chat history and would otherwise re-send the fact to the model.
+        gone = []
+        if self.memory is not None:
+            try:
+                gone = sorted({f.value for f in self.memory.all(include_forgotten=True) if f.forgotten and f.value},
+                              key=len, reverse=True)
+            except Exception:
+                gone = []
         kept: list[dict] = []
         for m in reversed(history):
+            content = m["content"]
+            for v in gone:
+                content = content.replace(v, "[forgotten]")
+            m = {**m, "content": content}
             t = count_tokens(m["content"]) + 4
             if used + t > self.cap:
                 break
