@@ -1,5 +1,5 @@
 PY := .venv/bin/python
-.PHONY: setup test evals demo demo-live sweep trace
+.PHONY: setup test evals demo demo-live record record-live record-restart record-restart-live sweep trace
 
 setup:
 	python3 -m venv .venv
@@ -16,6 +16,19 @@ demo:
 
 demo-live:
 	$(PY) -m errand_agent --reset
+
+# Screen-recording runs (see DEMO.md). Restart after /crash-mid-booking with record-restart (no --reset).
+record:
+	$(PY) -m errand_agent --scripted --reset --scenario demo
+
+record-live:
+	$(PY) -m errand_agent --reset --scenario demo
+
+record-restart:
+	$(PY) -m errand_agent --scripted --scenario demo
+
+record-restart-live:
+	$(PY) -m errand_agent --scenario demo
 
 sweep:
 	$(PY) scripts/check_invariants.py 500

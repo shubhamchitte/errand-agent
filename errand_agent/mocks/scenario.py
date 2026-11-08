@@ -20,6 +20,11 @@ class Scenario:
     # quoted price = search price + drift. Per provider overrides global.
     quote_drift: int = 0
     provider_quote_drift: dict[str, int] = field(default_factory=dict)
+    # Demo aid, only until the first booking exists: a (provider, slot) is first held for
+    # `first_booking_hold_minutes`, so the executor re-holds at approval time, and that re-hold quotes
+    # `first_booking_rehold_drift` more. Both are derived from the DB, so they survive restarts.
+    first_booking_hold_minutes: int | None = None
+    first_booking_rehold_drift: int = 0
     # slots (ISO "YYYY-MM-DDTHH:MM") that always cause slot_conflict on reschedule
     conflict_slots: set[str] = field(default_factory=set)
     hold_minutes: int = 10

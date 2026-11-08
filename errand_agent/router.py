@@ -135,6 +135,23 @@ def _slot(t: str) -> str | None:
     return f"{m.group(1)}T{m.group(2)}" if m else None
 
 
+def find_provider(t: str) -> str | None:
+    """Provider id mentioned by id, full name or distinctive first word ("quickfix", "sharma"); t is lower-case."""
+    m = re.search(r"\b(p_[a-z]+_\d+)\b", t)
+    if m and m.group(1) in mock_data.BY_ID:
+        return m.group(1)
+    for pid, p in mock_data.BY_ID.items():
+        name = p["name"].lower()
+        first = re.split(r"[\s&]+", name)[0]
+        if name in t or (len(first) >= 4 and re.search(rf"\b{re.escape(first)}\b", t)):
+            return pid
+    return None
+
+
+_ASK = re.compile(r"\b(reviews?|about|how is|how good|rating|ratings|feedback|reputation|any good|trustworthy|reliable)\b")
+_BOOKY = re.compile(r"\b(book|schedule|reschedule|cancel|switch|swap|instead|go with|take)\b")
+
+
 def extract_slots(text: str, now: datetime) -> dict:
     t = text.lower()
     out: dict = {}
@@ -171,6 +188,11 @@ def route(text: str, now: datetime, current_intent: str | None = None) -> Routed
     m = re.match(r"^\s*remember(?: that)?\s+(.+?)[.!]?\s*$", t)
     if m:
         return Routed("memory_command", slots, "remember", m.group(1))
+    pid = find_provider(t)
+    if pid and _ASK.search(t) and not _BOOKY.search(t):
+        return Routed("provider_question", {"provider_id": pid})
+    if re.search(r"\b(compare|comparison|my options|the options|alternatives|who else|side by side)\b", t) and not _BOOKY.search(t):
+        return Routed("compare_providers", {})
     correction = bool(re.match(r"^\s*(actually|sorry|correction|i meant|make it|change (it|that)|instead)\b", t))
     if re.search(r"\b(cancel|raddh|radd)\b", t) and not re.search(r"cancel that\b", t):
         return Routed("cancel", slots)

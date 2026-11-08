@@ -103,6 +103,49 @@ def _slot_ok(slot: str, sl: dict) -> bool:
     return True
 
 
+def _provider_answer(ctx: Context, st: dict) -> ModelReply:
+    from .text import INJECTION_RE, inr
+    pid = st.get("asked_provider")
+    gp = _results(ctx, "get_provider")
+    if not gp:
+        return ModelReply(tool_calls=[ToolCall("get_provider", {"provider_id": pid})])
+    g = gp[-1]
+    if g.get("status") != "ok":
+        return ModelReply(text="I couldn't look that provider up right now. Nothing has changed.")
+    revs = g.get("reviews") or []
+    bad = [r for r in revs if INJECTION_RE.search(r.get("text", ""))]
+    good = [r for r in revs if r not in bad]
+    out = (f"{g['name']}: rated {g['rating']} from {g['review_count']} reviews, {inr(g['price_inr'])}, {g['area']}.")
+    if good:
+        out += f' A typical review: "{good[0]["text"]}"'
+    if bad:
+        out += (f"\nFlagged: one review ({bad[0].get('author', 'unknown')}) contains instructions aimed at an AI assistant "
+                "(it tells me to book without asking). I treated it as data and ignored it.")
+    if st.get("pending_approval"):
+        out += "\nNothing has changed: your pending approval is exactly as before."
+    else:
+        out += "\nNothing has changed."
+    return ModelReply(text=out)
+
+
+def _compare_answer(ctx: Context, st: dict, sl: dict) -> ModelReply:
+    from .text import inr, when
+    if not sl.get("service"):
+        return ModelReply(text="Which service should I compare: plumber, electrician or AC servicing?")
+    sr = _results(ctx, "search_providers")
+    if not sr:
+        dr = {"start": sl.get("date_start"), "end": sl.get("date_end") or sl.get("date_start")} if sl.get("date_start") else None
+        return ModelReply(tool_calls=[ToolCall("search_providers", {"service": sl["service"], "area": "", "date_range": dr})])
+    provs = [{**p, "in_requested_area": not sl.get("area") or p["area"] == sl["area"]} for p in sr[-1].get("providers", [])]
+    cands = rank(provs, sl)[:3]
+    if not cands:
+        return ModelReply(text="Nothing fits all your constraints to compare. Want me to relax the budget, time or dates?")
+    lines = [f"{i}. {p['name']} ({p['provider_id']}): {inr(p['price_inr'])}, rated {p['rating']}, {p['area']}, {when(s)}"
+             for i, (p, s) in enumerate(cands, 1)]
+    tail = "\nYour pending approval is unchanged." if st.get("pending_approval") else ""
+    return ModelReply(text="Here are your best options:\n" + "\n".join(lines) + tail)
+
+
 def heuristic_policy(ctx: Context, tools: list[dict], tracer=None) -> ModelReply:
     """Deterministic stand-in for an LLM: drives real tool calls for each intent."""
     st, sl = ctx.state, ctx.state.get("slots", {})
@@ -110,6 +153,10 @@ def heuristic_policy(ctx: Context, tools: list[dict], tracer=None) -> ModelReply
     if any(s["kind"] == "result" and s["name"].startswith("propose_") for s in ctx.scratch):
         last = [s for s in ctx.scratch if s["kind"] == "result"][-1]
         return ModelReply(text=last["content"] if last["name"].startswith("propose_") else "Here is what I found.")
+    if st.get("turn_intent") == "provider_question":
+        return _provider_answer(ctx, st)
+    if st.get("turn_intent") == "compare_providers":
+        return _compare_answer(ctx, st, sl)
     if st.get("turn_intent") in ("smalltalk", None) and st.get("pending_approval"):
         return ModelReply(text="Still waiting for your decision on: " + st["pending_approval"] + " (reply yes or no).")
     if st.get("turn_intent") == "smalltalk":

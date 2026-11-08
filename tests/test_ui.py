@@ -53,3 +53,77 @@ def test_plain_mode(tmp_path, monkeypatch, capsys):
 
 def test_slash_map():
     assert slash_to_message("/forget home.gate") == "forget home.gate"
+
+
+# ---------------------------------------------------------------- demo scenario + context stat
+import os
+
+from errand_agent.models import ScriptedModel  # noqa: E402
+
+
+def _demo_agent(tmp_path, name="d.db"):
+    tr = UITracer("demo", str(tmp_path))
+    return build(str(tmp_path / name), True, scenario="demo", tracer=tr), tr
+
+
+def test_demo_scenario_beats(tmp_path):
+    a, tr = _demo_agent(tmp_path)
+    assert "date" in a.handle_user_message("I need a plumber")
+    assert "Please approve" in a.handle_user_message("tomorrow")
+    out = a.handle_user_message("actually make it Saturday")
+    assert "Sat" in out and "₹1,500" in out and "Indiranagar" in out and "1 min" in out
+    cmp_ = a.handle_user_message("compare my options")
+    assert "Sharma" in cmp_ and "pending approval is unchanged" in cmp_
+    out = a.handle_user_message("what do the reviews say about QuickFix?")
+    assert "Flagged" in out and "ignored" in out and "Nothing has changed" in out
+    assert a.gate.active() is not None and a.gate.active().card.provider_name.startswith("Sharma")
+    out = a.handle_user_message("yes")  # re-hold quotes +150 -> new card, nothing booked
+    assert "₹1,350" in out and "Nothing is booked yet" in out
+    assert a.env.call_count("book") == 0
+    out = a.handle_user_message("yes")  # first book times out but booked; verified
+    assert "Booked (verified)" in out and "booked once" in out and a.env.call_count("book") == 1
+    assert "already done" in a.handle_user_message("yes")
+    n = a.env.conn.execute("SELECT COUNT(*) FROM mock_bookings WHERE provider_id='p_plm_1' AND status='confirmed'").fetchone()[0]
+    assert n == 1
+
+
+def test_demo_crash_then_recover_same_key(tmp_path):
+    from errand_agent.__main__ import arm_crash
+    a, _ = _demo_agent(tmp_path)
+    out = a.handle_user_message("I need an electrician tomorrow")
+    if "Should I remember that?" in out:  # fresh DB: one-off guess question first
+        out = a.handle_user_message("no")
+    assert "Please approve" in out
+    killed = []
+    arm_crash(a, kill=lambda: killed.append(1))
+    a.handle_user_message("yes")  # fresh DB has no booking yet, so this is the demo re-hold/drift card
+    a.handle_user_message("yes")
+    assert killed
+    keys = [r[0] for r in a.conn.execute("SELECT idempotency_key FROM wf_exec").fetchall()]
+    a.conn.execute("UPDATE wf_exec SET status='EXECUTING'")  # as left by a hard kill mid-call
+    a.conn.commit()
+    b = build(str(tmp_path / "d.db"), True, scenario="demo")
+    assert any("Booked (verified)" in m for m in b.startup_messages)
+    assert [r[0] for r in b.conn.execute("SELECT idempotency_key FROM wf_exec").fetchall()] == keys
+    assert b.conn.execute("SELECT COUNT(*) FROM mock_bookings WHERE idempotency_key=?", (keys[0],)).fetchone()[0] == 1
+
+
+def test_context_stat_event_and_pane(tmp_path):
+    a, tr = _demo_agent(tmp_path, "c.db")
+    a.handle_user_message("I need a plumber")
+    ev = [e for e in tr.snapshot() if e["type"] == "context_stat"]
+    assert ev and ev[0]["stored"] >= 50 and 0 < ev[0]["sent"] <= ev[0]["stored"] and ev[0]["excluded"] > 0
+    assert ev[0]["line"].startswith(f"memory: {ev[0]['stored']} stored → {ev[0]['sent']} sent (")
+    assert "excluded: forgotten/unconfirmed) · context " in ev[0]["line"] and "/4,000 tokens" in ev[0]["line"]
+    items = trace_items(tr.snapshot(), 140)
+    assert any("memory: " in str(getattr(r, "plain", "")) for r, _ in items)
+    jl = [json.loads(x) for x in tr.path.read_text().splitlines()]  # plain mode reads the same JSONL
+    assert any(e["type"] == "context_stat" and "line" in e for e in jl)
+    # one stat per model turn
+    assert len(ev) == sum(1 for e in tr.snapshot() if e["type"] == "model_call")
+
+
+def test_makefile_targets():
+    mk = open(os.path.join(os.path.dirname(__file__), "..", "Makefile")).read()
+    assert "record:" in mk and "--scripted --reset --scenario demo" in mk
+    assert "record-live:" in mk and "-m errand_agent --reset --scenario demo" in mk

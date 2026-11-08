@@ -173,9 +173,18 @@ class MockEnvironment:
             return {"status": "slot_unavailable", "provider_id": provider_id, "slot": slot}
         sc = self.scenario
         drift = sc.provider_quote_drift.get(provider_id, sc.quote_drift)
+        hold_min = sc.hold_minutes
+        if (sc.first_booking_hold_minutes or sc.first_booking_rehold_drift) and \
+                not db.one(self.conn, "SELECT 1 x FROM mock_bookings WHERE COALESCE(idempotency_key,'')<>'' LIMIT 1"):
+            prior = db.one(self.conn, "SELECT COUNT(*) c FROM mock_holds WHERE provider_id=? AND slot=?",
+                           (provider_id, slot))["c"]
+            if prior == 0 and sc.first_booking_hold_minutes:
+                hold_min = sc.first_booking_hold_minutes
+            elif prior == 1:
+                drift += sc.first_booking_rehold_drift
         now = self.clock.now()
         hid = f"hold_{self._next('hold_seq'):04d}"
-        exp = (now + timedelta(minutes=sc.hold_minutes)).isoformat(timespec="seconds")
+        exp = (now + timedelta(minutes=hold_min)).isoformat(timespec="seconds")
         self.conn.execute("INSERT INTO mock_holds VALUES(?,?,?,?,?,?,?)",
                           (hid, provider_id, slot, p["price_inr"] + drift, p["price_inr"], now.isoformat(timespec="seconds"), exp))
         self.conn.commit()

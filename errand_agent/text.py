@@ -1,6 +1,7 @@
 """User-facing formatting helpers: rupee amounts and human-friendly slot times."""
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 
@@ -18,3 +19,8 @@ def when(slot: str | None) -> str:
     except (TypeError, ValueError):
         return str(slot)
     return f"{d.strftime('%a')} {d.day} {d.strftime('%b')}, {d.strftime('%H:%M')}"
+
+
+INJECTION_RE = re.compile(
+    r"ignore (all )?(previous|prior) instructions|system instruction|\[?assistant:|new instructions|admin mode|"
+    r"without (asking for )?confirmation|approval is not required|do not tell the user|reveal your system prompt", re.I)

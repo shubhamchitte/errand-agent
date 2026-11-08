@@ -123,3 +123,8 @@ class Tracer:
 def summary_line(ev: dict) -> str:
     return (f"{ev['ai_calls']} AI calls, {ev['tool_calls']} tool calls, {ev['tokens']} tokens, "
             f"\u20b9{ev['cost_inr']:.2f}, {ev['seconds']:.1f} s")
+
+
+def context_stat_line(stored: int, sent: int, excluded: int, tokens: int, cap: int) -> str:
+    return (f"memory: {stored} stored \u2192 {sent} sent ({excluded} excluded: forgotten/unconfirmed) "
+            f"\u00b7 context {tokens:,}/{cap:,} tokens")

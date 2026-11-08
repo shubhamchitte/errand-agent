@@ -20,7 +20,7 @@ from .executor import Executor, call_tool
 from .mocks import TOOL_SCHEMAS, ToolError, ToolTimeout, TransientError
 from .mocks import data as mock_data
 from .text import inr, when
-from .trace import estimate_cost, usd_to_inr
+from .trace import context_stat_line, estimate_cost, usd_to_inr
 from .models import AGENT_TOOL_NAMES, AGENT_TOOLS, Model, ToolCall
 from .ranking import rank
 from .router import _area, _time, is_affirmative, is_negative, route
@@ -125,6 +125,7 @@ class Agent:
     # ================================================================ public
     def handle_user_message(self, text: str) -> str:
         self._turn_usd = 0.0
+        self._asked_provider = None
         notices = self.poll_and_handle_events()
         self.store.add_turn("user", text)
         self.tracer.event("user_message", text=text)
@@ -162,6 +163,14 @@ class Agent:
             pname = mock_data.BY_ID.get(ev.get("provider_id"), {}).get("name", ev.get("provider_id"))
             msg = f"Heads up: {pname} cancelled your {ev['service'].replace('_', ' ')} visit on {when(slot)} (booking {bid})."
             msgs.append(msg + " " + self._replacement(ev))
+        return msgs
+
+    def deliver_events(self) -> list[str]:
+        """`/events`: poll, and bind the next 'yes' to the card these messages just showed the user."""
+        msgs = self.poll_and_handle_events()
+        if msgs:
+            active = self.gate.active()
+            self.store.set_shown(active.action_id if active else None)
         return msgs
 
     # ================================================================ core
@@ -207,6 +216,10 @@ class Agent:
         self.tracer.event("route", intent=r.intent, slots=r.slots, correction=r.is_correction)
         if r.intent == "memory_command":
             return self._memory_command(r)
+        if r.intent in ("provider_question", "compare_providers"):
+            # read-only questions: never touch slots, the pending approval or the workflow state
+            self._asked_provider = r.slots.get("provider_id")
+            return self._loop(text, wf, r.intent)
         prev_intent = wf.intent
         if r.intent in ACTION_INTENTS:
             terminal = wf.state in (S.DONE, S.FAILED, S.ESCALATED, S.IDLE)
@@ -279,6 +292,8 @@ class Agent:
         p = self.gate.active()
         d = {"user_id": self.user_id, "state": wf.state, "intent": wf.intent, "slots": wf.slots.to_dict(),
              "missing": wf.missing(), "today": self.clock.now().date().isoformat()}
+        if getattr(self, "_asked_provider", None):
+            d["asked_provider"] = self._asked_provider
         if wf.notes.get("from_memory"):
             d["slots_from_memory"] = sorted(wf.notes["from_memory"])
         if wf.notes.get("alternatives"):
@@ -299,6 +314,7 @@ class Agent:
             st["turn_intent"] = turn_intent
             ctx = self.builder.build(st, history, text, scratch)
             self.tracer.context(ctx)
+            self._context_stat(ctx)
             m0 = self.timer()
             reply = self.model.respond(ctx, AGENT_TOOLS)
             u = reply.usage or {}
@@ -325,6 +341,19 @@ class Agent:
                 return lead + proposed
         return self._exit("max_model_turns", "I couldn't sort that out in one go. Nothing was booked or "
                           "changed. Could you rephrase, or give me a bit more detail?")
+
+    def _context_stat(self, ctx) -> None:
+        """One trace line per model turn: how much memory exists vs. was sent, and context size vs. the cap."""
+        if self.memory is None:
+            return
+        try:
+            facts = self.memory.all(include_forgotten=True)
+        except Exception:
+            return
+        excluded = sum(1 for f in facts if f.forgotten or (f.source == "inferred" and not f.confirmed))
+        self.tracer.event("context_stat", stored=len(facts), sent=len(ctx.fact_ids), excluded=excluded,
+                          tokens=ctx.tokens, cap=self.builder.cap,
+                          line=context_stat_line(len(facts), len(ctx.fact_ids), excluded, ctx.tokens, self.builder.cap))
 
     def _exit(self, reason: str, msg: str) -> str:
         self.tracer.event("limit_exit", reason=reason)
@@ -540,6 +569,8 @@ class Agent:
             self.store.transition(wf, S.DONE, out.message)
             return out.message
         if out.status == "reask" and out.new_card:
+            self.tracer.event("approval_invalidated", action_id=action.action_id,
+                              reason=f"quote changed {action.card.price_inr} -> {out.new_card.price_inr}; re-asking")
             new = self.gate.propose(out.new_card, out.hold["hold_id"], out.hold["expires_at"])
             self.store.transition(wf, S.AWAITING_APPROVAL, "re-ask after change")
             self.tracer.event("pending_action", action_id=new.action_id, hash=new.hash, fingerprint=new.card.fingerprint(), card=new.card.render())

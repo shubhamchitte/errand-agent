@@ -2,7 +2,7 @@
 
 Default is a two-pane rich UI (chat | live trace). `--plain` prints chat to stdout and writes the
 trace to runs/<run_id>.jsonl (`tail -f` it). Slash commands: /events, /cancel-provider <booking_id>,
-/memory, /forget <key>, /quit.
+/memory, /forget <key>, /quit. Debug: /crash-mid-booking.
 """
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ SCENARIOS = {
     "price_drift": "quoted price rises above the search price (needs re-approval)",
     "slot_conflict": "first reschedule hits a slot conflict",
     "transient_error": "first booking call fails with a 503",
+    "demo": "recording run: injection review on, re-hold price drifts, 1st book times out but books",
     "injection": "default catalogue with prompt-injection reviews (no forced outcome)",
 }
 
@@ -36,6 +37,10 @@ def make_scenario(name: str | None, seed: int = 42) -> Scenario:
     sc = Scenario(seed=seed)
     if name in (None, "", "injection"):
         return sc
+    if name == "demo":
+        # until the first booking exists: holds last 1 min, so approving triggers a re-hold that quotes +150
+        sc.first_booking_hold_minutes, sc.first_booking_rehold_drift = 1, 150
+        return sc.force("book", 1, "timeout_booked").force("book", 2, "success").force("book", 3, "success")
     if name == "happy":
         return sc.force("book", 1, "success")
     if name == "price_drift":
@@ -90,6 +95,24 @@ def slash_to_message(text: str) -> str | None:
     return None
 
 
+def arm_crash(agent: Agent, kill=None) -> None:
+    """DEMO/DEBUG aid (`/crash-mid-booking`): on the next `book` call the booking reaches the provider, then the
+    process is SIGKILL-style terminated before the agent sees the reply. Restart without --reset to watch recovery
+    re-verify the same idempotency key. `kill` is injectable for tests."""
+    real = agent.env.book
+
+    def book_then_die(*a, **kw):
+        try:
+            real(*a, **kw)
+        finally:
+            msg = "[debug] booking reached the provider; killing the process before the reply was processed"
+            print(msg, file=sys.stderr, flush=True)
+            (kill or (lambda: os._exit(137)))()
+        return real(*a, **kw)  # only reached when `kill` returns (tests)
+
+    agent.env.book = book_then_die
+
+
 def run_plain(agent: Agent) -> None:
     print(f"Errand agent ({agent.model.name}). Trace: {agent.tracer.path}  (tail -f it). /quit to exit.")
     for m in agent.startup_messages:
@@ -104,12 +127,18 @@ def run_plain(agent: Agent) -> None:
         if text == "/quit":
             break
         if text == "/events":
-            for m in agent.poll_and_handle_events() or ["(no events)"]:
+            for m in agent.deliver_events() or ["(no events)"]:
                 print("agent>", m)
+            continue
+        if text == "/crash-mid-booking":
+            arm_crash(agent)
+            print("sys> armed: the next booking call will reach the provider, then the process is killed")
             continue
         if text.startswith(("/cancel-provider ", "/cancel-by-provider ")):
             try:
-                print(agent.env.emit_provider_cancellation(text.split()[1]))
+                ev = agent.env.emit_provider_cancellation(text.split()[1])
+                agent.tracer.event("external_event", event=ev, note="simulated provider cancellation")
+                print(f"sys> simulated: provider cancelled {ev['booking_id']}. Run /events or send any message.")
             except (KeyError, IndexError):
                 print("unknown booking id")
             continue

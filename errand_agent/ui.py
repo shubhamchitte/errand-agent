@@ -18,12 +18,10 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .agent import Agent, new_run_id
+from .text import INJECTION_RE
 from .trace import Tracer
 
-INJECTION_RE = re.compile(
-    r"ignore (all )?(previous|prior) instructions|system instruction|\[?assistant:|new instructions|admin mode|"
-    r"without (asking for )?confirmation|approval is not required|do not tell the user|reveal your system prompt", re.I)
-HELP = ("/events  poll provider events\n/cancel-provider <booking_id>  simulate provider cancellation\n"
+HELP = ("/events  poll provider events\n/crash-mid-booking  DEBUG: kill the process during the next booking\n/cancel-provider <booking_id>  simulate provider cancellation\n"
         "/memory  /forget <key>  /help  /quit")
 
 
@@ -61,6 +59,8 @@ def trace_items(events: list[dict], width: int) -> list[tuple[Any, int]]:
         elif t == "model_call":
             line("magenta", f"{ts} MODEL {e['model']} in={e['input_tokens']} out={e['output_tokens']} "
                             f"${e['cost_usd']:.4f} (₹{e.get('cost_inr', 0):.2f}) {e['latency_ms']:.0f}ms")
+        elif t == "context_stat":
+            line("bold white on grey23", e["line"])
         elif t == "tool_call":
             err = e.get("error")
             line("red" if err else "green",
@@ -190,10 +190,14 @@ def run_ui(db_path: str, scripted: bool, seed: int = 42, scenario: str | None = 
 
 def _job(agent: Agent, text: str, slash_to_message):
     def events() -> list[tuple[str, str]]:
-        return [("agent", m) for m in (agent.poll_and_handle_events() or ["(no events)"])]
+        return [("agent", m) for m in (agent.deliver_events() or ["(no events)"])]
 
     if text == "/events":
         return events
+    if text == "/crash-mid-booking":
+        from .__main__ import arm_crash
+        arm_crash(agent)
+        return lambda: [("sys", "armed: the next booking call will reach the provider, then the process is killed")]
     if text.startswith(("/cancel-provider ", "/cancel-by-provider ")):
         def cancel():
             try:
