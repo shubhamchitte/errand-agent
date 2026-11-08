@@ -88,6 +88,10 @@ def _budget(t: str) -> int | None:
     return int(m.group(1).replace(",", "")) if m else None
 
 
+# "tomorrow" plus common misspellings; fixed pattern, so matching stays deterministic
+_TOMORROW = re.compile(r"\b(?:tomm?or+ow|tomm?orow|tomorow|tmrw|tmr)\b")
+
+
 def _dates(t: str, today: date) -> tuple[str | None, str | None]:
     m = re.findall(r"\b(\d{4}-\d{2}-\d{2})\b", t)
     if m:
@@ -110,7 +114,7 @@ def _dates(t: str, today: date) -> tuple[str | None, str | None]:
     if "day after tomorrow" in t:
         d = today + timedelta(days=2)
         return d.isoformat(), d.isoformat()
-    if "tomorrow" in t:
+    if _TOMORROW.search(t):
         d = today + timedelta(days=1)
         return d.isoformat(), d.isoformat()
     if re.search(r"\btoday\b", t):

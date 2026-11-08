@@ -60,6 +60,9 @@ MEMORY_SLOT_MAP: dict[str, tuple[str, object]] = {
 _SCHEMAS = {t["name"]: t for t in TOOL_SCHEMAS}
 
 
+HOLD_EXPIRED_PHRASE = "your pick (hold expired; I'll re-hold when you say yes)"
+
+
 @dataclass
 class Limits:
     max_model_turns: int = 6
@@ -240,7 +243,7 @@ class Agent:
                 self.store.save(wf)
                 return q
         self.store.save(wf)
-        if wf.intent in ACTION_INTENTS:
+        if r.intent in ACTION_INTENTS or (changed and wf.intent in ACTION_INTENTS):
             self.store.transition(wf, S.GATHERING if wf.missing() else S.SEARCHING, f"intent={wf.intent}")
         return self._loop(text, wf, r.intent)
 
@@ -300,6 +303,7 @@ class Agent:
             d["alternatives"] = wf.notes["alternatives"]
         if p:
             d["pending_approval"] = p.card.render()
+            d["pending_pick"] = {"provider_id": p.card.provider_id, "slot": p.card.slot, "hold": self._hold_phrase(p)}
         return d
 
     def _loop(self, text: str, wf: S.Workflow, turn_intent: str | None = None) -> str:
@@ -549,6 +553,15 @@ class Agent:
         return "Why: " + ", ".join(parts) + ".", list(dict.fromkeys(i for i in ids if i))
 
     # ================================================================ approval + execution
+    def _hold_phrase(self, act) -> str | None:
+        """Hold status checked against the clock; None if the action has no hold."""
+        left = act.hold_seconds_left(self.clock)
+        if left is None:
+            return None
+        if left <= 0:
+            return HOLD_EXPIRED_PHRASE
+        return f"held, {act.hold_minutes_left(self.clock)} min left"
+
     def _hold_note(self, act) -> str:
         n = act.hold_minutes_left(self.clock)
         return f"\nSlot held for {n} min." if n is not None else ""

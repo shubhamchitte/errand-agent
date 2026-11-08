@@ -140,7 +140,14 @@ def _compare_answer(ctx: Context, st: dict, sl: dict) -> ModelReply:
     cands = rank(provs, sl)[:3]
     if not cands:
         return ModelReply(text="Nothing fits all your constraints to compare. Want me to relax the budget, time or dates?")
-    lines = [f"{i}. {p['name']} ({p['provider_id']}): {inr(p['price_inr'])}, rated {p['rating']}, {p['area']}, {when(s)}"
+    pick = st.get("pending_pick") or {}
+
+    def mark(p, s):
+        if pick.get("hold") and p["provider_id"] == pick.get("provider_id") and s == pick.get("slot"):
+            h = pick["hold"]
+            return f" - {h}" if h.startswith("your pick") else f" - your pick ({h})"
+        return ""
+    lines = [f"{i}. {p['name']} ({p['provider_id']}): {inr(p['price_inr'])}, rated {p['rating']}, {p['area']}, {when(s)}{mark(p, s)}"
              for i, (p, s) in enumerate(cands, 1)]
     tail = "\nYour pending approval is unchanged." if st.get("pending_approval") else ""
     return ModelReply(text="Here are your best options:\n" + "\n".join(lines) + tail)

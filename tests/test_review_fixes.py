@@ -355,3 +355,43 @@ def test_chat_pane_strips_markdown():
     from errand_agent.ui import chat_lines
     out = "".join(t.plain for t in chat_lines([("agent", "## Hi\n**Bob** is `ok`")], 60, 20))
     assert "**" not in out and "`" not in out and "#" not in out and "Bob is ok" in out
+
+
+# ------------------------------------------------------------ run_f8c4c302 cosmetic fixes
+@pytest.mark.parametrize("word", ["tomorrow", "tommorow", "tomorow", "tmrw", "tmr", "tomorrow,"])
+def test_tomorrow_misspellings_route_to_the_date(word):
+    from datetime import datetime
+    from errand_agent.router import route
+    now = datetime(2026, 11, 8, 10, 0)
+    r = route(word, now, "new_booking")
+    assert r.intent == "new_booking" and r.slots["date_start"] == "2026-11-09"
+    assert route("electrician " + word, now).slots["date_start"] == "2026-11-09"
+
+
+def _pick_and_compare(tmp_path, advance_s):
+    a, env, conn, clock = mk(tmp_path, Scenario(seed=1, hold_minutes=1))
+    a.handle_user_message(f"electrician in Indiranagar on {MON}")
+    assert a.gate.active() is not None
+    clock.advance(seconds=advance_s)
+    return a, a.handle_user_message("compare my options")
+
+
+def test_compare_says_hold_expired_when_hold_lapsed(tmp_path):
+    a, out = _pick_and_compare(tmp_path, 120)
+    assert "your pick (hold expired; I'll re-hold when you say yes)" in out
+    assert "already held" not in out
+
+
+def test_compare_mentions_live_hold_with_time_left(tmp_path):
+    a, out = _pick_and_compare(tmp_path, 10)
+    assert "your pick (held, 1 min left)" in out and "expired" not in out
+
+
+def test_informational_turns_do_not_change_state(tmp_path):
+    a, env, conn, clock = mk(tmp_path, Scenario(seed=1))
+    a.handle_user_message(f"electrician in Indiranagar on {MON}")
+    n = len(events(a, "state_transition"))
+    for msg in ("compare my options", "what do the reviews say", "how is Ravi Kumar Electricals rated"):
+        a.handle_user_message(msg)
+        assert a.store.load().state == S.AWAITING_APPROVAL, msg
+    assert len(events(a, "state_transition")) == n
