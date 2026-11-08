@@ -51,9 +51,9 @@ Slash commands in the chat:
 | `/forget <key>` | forget one fact (`forget my dog` in plain words works too) |
 | `/cancel-provider <booking_id>` | simulate the provider cancelling, e.g. `bk_seed_4` |
 | `/events` | check for provider events now (the next message also checks) |
-| `/up`, `/down`, `/scroll N`, `/bottom` | page through chat and trace history (`/scroll 5` = 5 lines up, `/scroll -5` down); `/bottom` returns to live view |
+| `/bottom` | back to the normal two-pane view (after `/trace` or `/chat`); older output: scroll the terminal itself |
 | `/trace [N]` | show the last N trace events (default 5) in full JSON in the trace pane |
-| `/chat` | show the full chat history from the top |
+| `/chat` | show the whole chat history (the terminal scrollback also works) |
 | `/help`, `/quit` | on quit, the JSONL trace path and the chat transcript are printed (also saved to `runs/<id>.chat.txt`) |
 
 Tip: to see anything cut off: `/trace 5`, or open `runs/<id>.jsonl`.

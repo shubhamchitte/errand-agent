@@ -94,8 +94,8 @@ after the restart before `/quit`, or quit before beat 5 in a separate rehearsal.
 - Date-relative: see the Friday note at the top. `make record` / `make record-live` always use `--reset`; never use them for the restart.
 
 
-## UI scrolling and cut-off text
-- Long trace lines wrap; the newest stay visible. Scroll with `/up`, `/down`, `/scroll N`; `/bottom` returns to live view.
-- `/trace [N]` shows the last N trace events as full JSON; `/chat` shows the full chat from the top.
+## UI display and cut-off text
+- Normal screen (no alternate screen): each redraw clears and prints both panels sized to their content; long lines wrap, the newest stay visible. Scroll with the terminal itself (mouse/trackpad); `/bottom` returns to the normal view.
+- `/trace [N]` shows the last N trace events as full JSON; `/chat` shows the whole chat history.
 - On `/quit` the JSONL trace path and the chat transcript are printed (also saved as `runs/<id>.chat.txt`).
 - To see anything cut off: /trace 5, or open runs/<id>.jsonl.

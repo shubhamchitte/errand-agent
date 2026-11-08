@@ -138,13 +138,12 @@ def test_trace_wraps_and_scrolls():
     assert len(items) > 3 and "…" not in "".join(r.plain for r, _ in items)
     many = [(__import__("rich.text").text.Text(str(i)), 1) for i in range(30)]
     assert tail_fit(many, 5)[-1].plain == "29"
-    assert tail_fit(many, 5, 10)[-1].plain == "19"
     msgs = [("agent", "word " * 200)]
-    assert len(chat_lines(msgs, 40, 5, 3)) == 5
+    assert len(chat_lines(msgs, 40, 5)) == 5
     v = View()
-    assert handle_view_command(v, "/up") == "" and v.offset > 0
+    assert handle_view_command(v, "/chat") == "" and v.full_chat
     handle_view_command(v, "/trace 3")
-    assert v.trace_n == 3 and v.offset == 0
+    assert v.trace_n == 3 and not v.full_chat
     handle_view_command(v, "/bottom")
     assert v.trace_n is None and handle_view_command(v, "/nope") is None
 

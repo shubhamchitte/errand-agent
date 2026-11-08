@@ -499,7 +499,7 @@ class Agent:
             act = self.gate.propose(card)
             note = ""
         self.store.transition(wf, S.AWAITING_APPROVAL, f"proposed {card.type}")
-        self.tracer.event("pending_action", action_id=act.action_id, hash=act.hash, fingerprint=card.fingerprint(), card=card.render())
+        self.tracer.event("pending_action", action_id=act.action_id, hash=act.hash, fingerprint=card.fingerprint(), card_text=card.render())
         why, fact_ids = self._why(wf, card)
         self.tracer.event("proposal_why", action_id=act.action_id, fact_ids=fact_ids, why=why)
         rendered = f"Please approve: {card.friendly()} ({card.fingerprint()}){note}\n{why}\nReply 'yes' to confirm or 'no' to cancel."
@@ -573,7 +573,7 @@ class Agent:
                               reason=f"quote changed {action.card.price_inr} -> {out.new_card.price_inr}; re-asking")
             new = self.gate.propose(out.new_card, out.hold["hold_id"], out.hold["expires_at"])
             self.store.transition(wf, S.AWAITING_APPROVAL, "re-ask after change")
-            self.tracer.event("pending_action", action_id=new.action_id, hash=new.hash, fingerprint=new.card.fingerprint(), card=new.card.render())
+            self.tracer.event("pending_action", action_id=new.action_id, hash=new.hash, fingerprint=new.card.fingerprint(), card_text=new.card.render())
             why, fact_ids = self._why(wf, new.card)
             self.tracer.event("proposal_why", action_id=new.action_id, fact_ids=fact_ids, why=why)
             return (f"{out.message}\nPlease approve: {new.card.friendly()} ({new.card.fingerprint()})"

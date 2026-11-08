@@ -59,8 +59,11 @@ class Tracer:
         self._events: list[dict] = []
 
     def event(self, type: str, **data: Any) -> dict:
+        raw = data.pop("card_text", None)  # approval card text: shown in full (the generic sanitizer would cut it at 200 chars)
         ev = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
               "run_id": self.run_id, "type": type, **sanitize(data)}
+        if raw is not None:
+            ev["card_text"] = _SECRET_VAL.sub("[REDACTED]", str(raw))
         self._events.append(ev)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(ev, sort_keys=False) + "\n")
