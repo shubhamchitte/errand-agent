@@ -127,3 +127,39 @@ def test_makefile_targets():
     mk = open(os.path.join(os.path.dirname(__file__), "..", "Makefile")).read()
     assert "record:" in mk and "--scripted --reset --scenario demo" in mk
     assert "record-live:" in mk and "-m errand_agent --reset --scenario demo" in mk
+
+
+def test_trace_wraps_and_scrolls():
+    from errand_agent.ui import View, chat_lines, handle_view_command, tail_fit
+    long = "x" * 300
+    evs = [{"type": "tool_call", "ts": "2025-01-01T00:00:00.000", "name": "t", "args": {}, "result_sanitized": long,
+            "latency_ms": 1, "error": None}]
+    items = trace_items(evs, 60)
+    assert len(items) > 3 and "…" not in "".join(r.plain for r, _ in items)
+    many = [(__import__("rich.text").text.Text(str(i)), 1) for i in range(30)]
+    assert tail_fit(many, 5)[-1].plain == "29"
+    assert tail_fit(many, 5, 10)[-1].plain == "19"
+    msgs = [("agent", "word " * 200)]
+    assert len(chat_lines(msgs, 40, 5, 3)) == 5
+    v = View()
+    assert handle_view_command(v, "/up") == "" and v.offset > 0
+    handle_view_command(v, "/trace 3")
+    assert v.trace_n == 3 and v.offset == 0
+    handle_view_command(v, "/bottom")
+    assert v.trace_n is None and handle_view_command(v, "/nope") is None
+
+
+def test_full_trace_render_and_exit(tmp_path):
+    from errand_agent.ui import View, _print_exit
+    tr = UITracer("ui2", str(tmp_path))
+    ag = build(str(tmp_path / "s.db"), True, tracer=tr)
+    ag.handle_user_message("Find me a plumber in Indiranagar tomorrow")
+    con = Console(width=140, height=40, record=True, file=open("/dev/null", "w"))
+    v = View()
+    v.trace_n = 2
+    con.print(render(con, ag, [("you", "hi")], view=v))
+    assert "as JSON" in con.export_text()
+    out = Console(width=100, record=True, file=open("/dev/null", "w"))
+    _print_exit(out, tr, [("you", "hi"), ("agent", "hello")])
+    assert (tmp_path / "ui2.chat.txt").read_text().startswith("you> hi")
+    assert "ui2.jsonl" in out.export_text()

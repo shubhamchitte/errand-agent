@@ -6,11 +6,17 @@ JSONL file into an in-memory list that the right pane renders.
 from __future__ import annotations
 
 import json
+import os
 import re
 import textwrap
 import threading
 import time
 from typing import Any
+
+try:  # line editing + history at the prompt (arrow keys instead of ^[[A)
+    import readline  # noqa: F401
+except ImportError:  # e.g. Windows
+    readline = None
 
 from rich.console import Console, Group
 from rich.layout import Layout
@@ -22,7 +28,19 @@ from .text import INJECTION_RE
 from .trace import Tracer
 
 HELP = ("/events  poll provider events\n/crash-mid-booking  DEBUG: kill the process during the next booking\n/cancel-provider <booking_id>  simulate provider cancellation\n"
-        "/memory  /forget <key>  /help  /quit")
+        "/memory  /forget <key>  /help  /quit\n"
+        "Scrolling: /up /down (page), /scroll N (+N lines up, -N down), /bottom (live view)\n"
+        "/trace [N]  last N trace events as full JSON (default 5)   /chat  full chat history from the top\n"
+        "Tip: to see anything cut off: /trace 5, or open runs/<id>.jsonl.")
+
+
+class View:
+    """Scroll/mode state. offset = lines scrolled up from the live bottom (0 = live)."""
+
+    def __init__(self) -> None:
+        self.offset = 0
+        self.trace_n: int | None = None  # None = normal trace view, else show last N events as full JSON
+        self.page = 10
 
 
 class UITracer(Tracer):
@@ -40,6 +58,11 @@ def _short(v: Any, n: int = 110) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _wrap(s: str, width: int, indent: str = "    ") -> list[str]:
+    return textwrap.wrap(s, max(width, 10), subsequent_indent=indent, break_long_words=True,
+                         replace_whitespace=False) or [""]
+
+
 def _t(ts: str) -> str:
     return ts[11:19] if len(ts) >= 19 else ""
 
@@ -49,8 +72,8 @@ def trace_items(events: list[dict], width: int) -> list[tuple[Any, int]]:
     out: list[tuple[Any, int]] = []
 
     def line(style: str, s: str, extra: str = "") -> None:
-        txt = Text(_short(s, width), style=style, no_wrap=True, overflow="ellipsis")
-        out.append((txt, 1))
+        for chunk in _wrap(s, width):
+            out.append((Text(chunk, style=style, no_wrap=True), 1))
 
     for e in events:
         t, ts = e["type"], _t(e.get("ts", ""))
@@ -64,12 +87,12 @@ def trace_items(events: list[dict], width: int) -> list[tuple[Any, int]]:
         elif t == "tool_call":
             err = e.get("error")
             line("red" if err else "green",
-                 f"{ts} TOOL {e['name']}({_short(e['args'], 60)}) {e['latency_ms']:.0f}ms" + (f" ERR {err}" if err else ""))
-            line("dim", "    -> " + _short(e["result_sanitized"], width - 8))
+                 f"{ts} TOOL {e['name']}({_short(e['args'], 400)}) {e['latency_ms']:.0f}ms" + (f" ERR {err}" if err else ""))
+            line("dim", "    -> " + _short(e["result_sanitized"], 2000))
             blob = json.dumps([e["args"], e["result_sanitized"]], default=str)
             if INJECTION_RE.search(blob):
-                out.append((Text(_short("  !! INJECTION FLAG: untrusted text contains instructions - treated as data, ignored", width),
-                                 style="bold black on yellow", no_wrap=True), 1))
+                for chunk in _wrap("  !! INJECTION FLAG: untrusted text contains instructions - treated as data, ignored", width):
+                    out.append((Text(chunk, style="bold black on yellow", no_wrap=True), 1))
         elif t == "pending_action":
             card = [ln[: width - 4] for ln in str(e.get("card", "")).splitlines()][:10]
             body = Text("\n".join(card), style="bold")
@@ -85,19 +108,24 @@ def trace_items(events: list[dict], width: int) -> list[tuple[Any, int]]:
         elif t == "turn_cost":
             line("magenta", f"{ts} TURN COST ${e['cost_usd']:.4f} (₹{e['cost_inr']:.2f})")
         elif t == "approved":
-            line("bold green", f"{ts} APPROVED {_short({k: v for k, v in e.items() if k not in ('ts', 'run_id', 'type')}, 80)}")
+            line("bold green", f"{ts} APPROVED {_short({k: v for k, v in e.items() if k not in ('ts', 'run_id', 'type')}, 600)}")
         elif t in ("error", "gate_refused", "proposal_refused", "approval_invalidated", "approval_stale", "blocked_tool",
                    "duplicate_refused", "deadline_exceeded", "limit_exit"):
-            line("bold red", f"{ts} {t.upper()} {_short({k: v for k, v in e.items() if k not in ('ts', 'run_id', 'type')}, 90)}")
+            line("bold red", f"{ts} {t.upper()} {_short({k: v for k, v in e.items() if k not in ('ts', 'run_id', 'type')}, 800)}")
         elif t in ("user_message", "slots_updated", "context", "idempotency_key_persisted"):
             continue
         else:
             line("yellow" if t in ("retry", "external_event", "recovery", "execution") else "dim",
-                 f"{ts} {t} {_short({k: v for k, v in e.items() if k not in ('ts', 'run_id', 'type')}, 90)}")
+                 f"{ts} {t} {_short({k: v for k, v in e.items() if k not in ('ts', 'run_id', 'type')}, 800)}")
     return out
 
 
-def tail_fit(items: list[tuple[Any, int]], height: int) -> list[Any]:
+def tail_fit(items: list[tuple[Any, int]], height: int, offset: int = 0) -> list[Any]:
+    """Last `height` lines of items, optionally scrolled `offset` lines up from the end."""
+    skipped = 0
+    while offset > 0 and items and skipped + items[-1][1] <= offset:
+        skipped += items[-1][1]
+        items = items[:-1]
     chosen, used = [], 0
     for r, n in reversed(items):
         if used + n > height:
@@ -118,7 +146,7 @@ def strip_md(text: str) -> str:
     return text
 
 
-def chat_lines(msgs: list[tuple[str, str]], width: int, height: int) -> list[Text]:
+def chat_lines(msgs: list[tuple[str, str]], width: int, height: int, offset: int = 0) -> list[Text]:
     lines: list[Text] = []
     for who, text in msgs:
         style = {"you": "bold blue", "agent": "white", "sys": "dim italic"}.get(who, "white")
@@ -129,10 +157,25 @@ def chat_lines(msgs: list[tuple[str, str]], width: int, height: int) -> list[Tex
                 lines.append(Text((label if first else " " * len(label)) + w, style=style))
                 first = False
         lines.append(Text(""))
-    return lines[-height:] if height > 0 else []
+    if height <= 0:
+        return []
+    offset = max(0, min(offset, max(len(lines) - height, 0)))
+    end = len(lines) - offset
+    return lines[max(end - height, 0):end]
 
 
-def render(console: Console, agent: Agent, msgs: list[tuple[str, str]], busy: bool = False) -> Layout:
+def full_trace_items(events: list[dict], n: int, width: int) -> list[tuple[Any, int]]:
+    out: list[tuple[Any, int]] = []
+    for e in events[-max(n, 1):]:
+        for chunk in _wrap(json.dumps(e, ensure_ascii=False, default=str), width, indent="  "):
+            out.append((Text(chunk, style="white", no_wrap=True), 1))
+        out.append((Text(""), 1))
+    return out
+
+
+def render(console: Console, agent: Agent, msgs: list[tuple[str, str]], busy: bool = False,
+           view: "View | None" = None) -> Layout:
+    view = view or View()
     W, H = console.size
     H = max(H - 2, 10)  # leave room for the prompt line
     lw = W * 5 // 11
@@ -140,11 +183,19 @@ def render(console: Console, agent: Agent, msgs: list[tuple[str, str]], busy: bo
     inner_h = H - 2
     s = agent.tracer.summary() if hasattr(agent.tracer, "summary") else {}
     events = agent.tracer.snapshot() if hasattr(agent.tracer, "snapshot") else []
-    left = Panel(Group(*chat_lines(msgs, lw - 4, inner_h)), title=f"Chat - {agent.model.name}" + (" (thinking...)" if busy else ""),
+    view.page = max(inner_h - 2, 3)
+    items = (full_trace_items(events, view.trace_n, rw - 4) if view.trace_n is not None
+             else trace_items(events, rw - 4))
+    longest = max(len(chat_lines(msgs, lw - 4, 10 ** 9)), sum(n for _, n in items))
+    view.offset = max(0, min(view.offset, longest - 1))
+    scrolled = f" [scrolled up {view.offset}, /bottom]" if view.offset else ""
+    left = Panel(Group(*chat_lines(msgs, lw - 4, inner_h, view.offset)),
+                 title=f"Chat - {agent.model.name}" + (" (thinking...)" if busy else "") + scrolled,
                  border_style="blue", height=H)
     stats = (f"calls={s.get('model_calls', 0)} tok={s.get('input_tokens', 0)}/{s.get('output_tokens', 0)} "
              f"${s.get('cost_usd', 0):.4f}/₹{s.get('cost_inr', 0):.2f} tools={s.get('tool_calls', 0)} err={s.get('tool_errors', 0)}")
-    right = Panel(Group(*tail_fit(trace_items(events, rw - 4), inner_h)), title=f"Trace - {stats}",
+    right = Panel(Group(*tail_fit(items, inner_h, view.offset)),
+                  title=(f"Trace (last {view.trace_n} as JSON) - " if view.trace_n is not None else "Trace - ") + stats,
                   border_style="magenta", height=H)
     lay = Layout()
     lay.split_row(Layout(left, size=lw), Layout(right, size=rw))
@@ -164,14 +215,62 @@ def run_ui(db_path: str, scripted: bool, seed: int = 42, scenario: str | None = 
     with console.screen():
         _loop(console, agent, msgs, slash_to_message)
     console.print(agent.finish())
+    _print_exit(console, tracer, msgs)
+
+
+def transcript(msgs: list[tuple[str, str]]) -> str:
+    label = {"you": "you> ", "agent": "agent> ", "sys": "* "}
+    return "\n\n".join(label.get(w, "") + str(t) for w, t in msgs) + "\n"
+
+
+def _print_exit(console: Console, tracer: Tracer, msgs: list[tuple[str, str]]) -> None:
+    text = transcript(msgs)
+    chat_path = os.path.splitext(str(tracer.path))[0] + ".chat.txt"
+    try:
+        with open(chat_path, "w", encoding="utf-8") as f:
+            f.write(text)
+    except OSError:
+        chat_path = "(could not write)"
+    console.print(f"\nTrace (JSONL): {tracer.path}\nChat transcript: {chat_path}\n", markup=False, highlight=False)
+    console.print(text, markup=False, highlight=False)
+
+
+def handle_view_command(view: View, text: str) -> str | None:
+    """Scroll/mode commands. Returns a status message, or None if `text` is not a view command."""
+    cmd, _, arg = text.partition(" ")
+    arg = arg.strip()
+    if cmd == "/up":
+        view.offset += view.page
+    elif cmd == "/down":
+        view.offset = max(view.offset - view.page, 0)
+    elif cmd == "/scroll":
+        try:
+            view.offset = max(view.offset + int(arg), 0)
+        except ValueError:
+            return "usage: /scroll N  (positive = up, negative = down)"
+    elif cmd == "/bottom":
+        view.offset, view.trace_n = 0, None
+    elif cmd == "/trace":
+        try:
+            view.trace_n = int(arg) if arg else 5
+        except ValueError:
+            return "usage: /trace [N]"
+        view.offset = 0
+    elif cmd == "/chat":
+        view.offset = 10 ** 9  # clamped to the top of the history on render
+    else:
+        return None
+    return ""
 
 
 def _loop(console: Console, agent: Agent, msgs: list[tuple[str, str]], slash_to_message) -> None:
     from rich.live import Live
 
+    view = View()
+
     while True:
         console.clear()
-        console.print(render(console, agent, msgs), end="")
+        console.print(render(console, agent, msgs, view=view), end="")
         try:
             text = console.input("[bold blue]you> [/]").strip()
         except (EOFError, KeyboardInterrupt):
@@ -180,7 +279,13 @@ def _loop(console: Console, agent: Agent, msgs: list[tuple[str, str]], slash_to_
             continue
         if text in ("/quit", "/exit"):
             break
+        if text.split()[0] in ("/up", "/down", "/scroll", "/bottom", "/trace", "/chat"):
+            note = handle_view_command(view, text)
+            if note:
+                msgs.append(("sys", note))
+            continue
         msgs.append(("you", text))
+        view.offset = 0
         if text == "/help":
             msgs.append(("sys", HELP))
             continue
@@ -196,10 +301,10 @@ def _loop(console: Console, agent: Agent, msgs: list[tuple[str, str]], slash_to_
         th = threading.Thread(target=work, daemon=True)
         th.start()
         console.clear()
-        with Live(render(console, agent, msgs, True), console=console, refresh_per_second=8, auto_refresh=False,
+        with Live(render(console, agent, msgs, True, view), console=console, refresh_per_second=8, auto_refresh=False,
                   transient=True) as live:
             while th.is_alive():
-                live.update(render(console, agent, msgs, True), refresh=True)
+                live.update(render(console, agent, msgs, True, view), refresh=True)
                 time.sleep(0.12)
         out = box.get("out")
         for who, m in (out if isinstance(out, list) else [("agent", out)]):
