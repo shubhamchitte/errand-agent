@@ -107,13 +107,24 @@ def tail_fit(items: list[tuple[Any, int]], height: int) -> list[Any]:
     return list(reversed(chosen))
 
 
+_MD = [(re.compile(r"\*\*(.+?)\*\*"), r"\1"), (re.compile(r"__(.+?)__"), r"\1"), (re.compile(r"`([^`]+)`"), r"\1"),
+       (re.compile(r"^\s{0,3}#{1,6}\s+", re.M), ""), (re.compile(r"^(\s*)[*-]\s+", re.M), r"\1- ")]
+
+
+def strip_md(text: str) -> str:
+    """The chat pane is plain wrapped Text; drop markdown emphasis/headings so `**bold**` never shows raw."""
+    for rx, rep in _MD:
+        text = rx.sub(rep, text)
+    return text
+
+
 def chat_lines(msgs: list[tuple[str, str]], width: int, height: int) -> list[Text]:
     lines: list[Text] = []
     for who, text in msgs:
         style = {"you": "bold blue", "agent": "white", "sys": "dim italic"}.get(who, "white")
         label = {"you": "you> ", "agent": "agent> ", "sys": "* "}.get(who, "")
         first = True
-        for para in str(text).splitlines() or [""]:
+        for para in (strip_md(str(text)) if who == "agent" else str(text)).splitlines() or [""]:
             for w in textwrap.wrap(para, max(width - len(label), 10)) or [""]:
                 lines.append(Text((label if first else " " * len(label)) + w, style=style))
                 first = False
@@ -142,8 +153,6 @@ def render(console: Console, agent: Agent, msgs: list[tuple[str, str]], busy: bo
 
 def run_ui(db_path: str, scripted: bool, seed: int = 42, scenario: str | None = None,
            console: Console | None = None) -> None:
-    from rich.live import Live
-
     from .__main__ import build, slash_to_message
 
     console = console or Console()
@@ -151,9 +160,18 @@ def run_ui(db_path: str, scripted: bool, seed: int = 42, scenario: str | None = 
     agent = build(db_path, scripted, seed, scenario, tracer=tracer)
     msgs: list[tuple[str, str]] = [("sys", f"scenario={scenario or 'default'}  trace file: {tracer.path}  /help for commands")]
     msgs += [("agent", f"(recovery) {m}") for m in agent.startup_messages]
+    # alternate screen: one frame visible at a time, nothing stacked into the scrollback
+    with console.screen():
+        _loop(console, agent, msgs, slash_to_message)
+    console.print(agent.finish())
+
+
+def _loop(console: Console, agent: Agent, msgs: list[tuple[str, str]], slash_to_message) -> None:
+    from rich.live import Live
+
     while True:
         console.clear()
-        console.print(render(console, agent, msgs))
+        console.print(render(console, agent, msgs), end="")
         try:
             text = console.input("[bold blue]you> [/]").strip()
         except (EOFError, KeyboardInterrupt):
@@ -178,14 +196,14 @@ def run_ui(db_path: str, scripted: bool, seed: int = 42, scenario: str | None = 
         th = threading.Thread(target=work, daemon=True)
         th.start()
         console.clear()
-        with Live(render(console, agent, msgs, True), console=console, refresh_per_second=8, auto_refresh=False) as live:
+        with Live(render(console, agent, msgs, True), console=console, refresh_per_second=8, auto_refresh=False,
+                  transient=True) as live:
             while th.is_alive():
                 live.update(render(console, agent, msgs, True), refresh=True)
                 time.sleep(0.12)
         out = box.get("out")
         for who, m in (out if isinstance(out, list) else [("agent", out)]):
             msgs.append((who, m))
-    console.print(agent.finish())
 
 
 def _job(agent: Agent, text: str, slash_to_message):

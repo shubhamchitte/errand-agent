@@ -303,3 +303,55 @@ def test_forgotten_fact_scrubbed_from_history(tmp_path):
     assert w.mem.get(dog.key).forgotten
     w.say("electrician in Indiranagar tomorrow")
     assert dog.value not in w.payload_text()
+
+
+# ------------------------------------------------------------ live record-live bugs
+def test_relative_week_windows():
+    from datetime import date
+    from errand_agent.router import _dates
+    sun, wed = date(2026, 11, 8), date(2026, 11, 11)
+    assert _dates("this week", sun) == ("2026-11-08", "2026-11-14")
+    assert _dates("this week", wed) == ("2026-11-11", "2026-11-17")
+    assert _dates("next week", sun) == ("2026-11-09", "2026-11-15")
+    assert _dates("this weekend", wed) == ("2026-11-14", "2026-11-15")
+    assert _dates("this weekend", sun) == ("2026-11-08", "2026-11-08")
+
+
+def _fake_sdk_query(stream, exc):
+    async def fake(prompt, options):
+        for m in stream:
+            yield m
+        if exc:
+            raise exc
+    return fake
+
+
+def test_claude_agent_model_max_turns_returns_captured_tool_calls(monkeypatch):
+    import claude_agent_sdk
+    from claude_agent_sdk import AssistantMessage, ResultMessage, ToolUseBlock
+    from claude_agent_sdk._errors import ResultError
+    res = ResultMessage("error_max_turns", 10, 10, True, 1, "s", usage={"input_tokens": 500, "output_tokens": 50},
+                        total_cost_usd=0.01, result="Reached maximum number of turns")
+    stream = [AssistantMessage([ToolUseBlock("tu_9", "mcp__errand__search_providers", {"service": "plumber"})],
+                               "claude-sonnet-4-5"), res]
+    err = ResultError("Claude Code returned an error result: Reached maximum number of turns",
+                      data={"subtype": "error_max_turns", "result": "Reached maximum number of turns"}, exit_code=1)
+    monkeypatch.setattr(claude_agent_sdk, "query", _fake_sdk_query(stream, err))
+    ctx = ContextBuilder(None).build({"slots": {}}, [], "plumber this week", [])
+    r = ClaudeAgentModel("claude-sonnet-4-5").respond(ctx, AGENT_TOOLS)
+    assert [c.name for c in r.tool_calls] == ["search_providers"] and r.tool_calls[0].id == "tu_9"
+    assert "maximum" not in r.text and r.usage["cost_usd"] == 0.01
+
+
+def test_claude_agent_model_other_errors_still_raise(monkeypatch):
+    import claude_agent_sdk
+    monkeypatch.setattr(claude_agent_sdk, "query", _fake_sdk_query([], RuntimeError("boom")))
+    ctx = ContextBuilder(None).build({"slots": {}}, [], "hi", [])
+    with pytest.raises(RuntimeError):
+        ClaudeAgentModel("claude-sonnet-4-5").respond(ctx, AGENT_TOOLS)
+
+
+def test_chat_pane_strips_markdown():
+    from errand_agent.ui import chat_lines
+    out = "".join(t.plain for t in chat_lines([("agent", "## Hi\n**Bob** is `ok`")], 60, 20))
+    assert "**" not in out and "`" not in out and "#" not in out and "Bob is ok" in out

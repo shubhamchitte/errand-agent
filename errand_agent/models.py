@@ -305,7 +305,7 @@ class ClaudeAgentModel(Model):
                         calls.append(ToolCall(name, dict(b.input or {}), b.id))
             elif isinstance(msg, ResultMessage):
                 usage, reported = msg.usage or {}, msg.total_cost_usd
-                if not text and not calls and msg.result:
+                if not text and not calls and msg.result and not msg.is_error:
                     text = msg.result
         it = int(usage.get("input_tokens", 0) or 0) + int(usage.get("cache_read_input_tokens", 0) or 0) \
             + int(usage.get("cache_creation_input_tokens", 0) or 0)
@@ -324,8 +324,21 @@ class ClaudeAgentModel(Model):
             async for msg in query(prompt=context.render(), options=opts):
                 msgs.append(msg)
 
-        anyio.run(run)
+        try:
+            anyio.run(run)
+        except Exception as e:
+            return self.recover(e, msgs)
         return self.collect(msgs)
+
+    def recover(self, exc: Exception, msgs: list) -> ModelReply:
+        """max_turns=1 means a step that emits tool_use ends with an ``error_max_turns`` result (the SDK wants
+        another turn to feed the tool result back). That is the expected exit for us: the tool calls are already in
+        the stream, so return them for our own loop to execute. Any other error is re-raised."""
+        if getattr(exc, "subtype", None) == "error_max_turns" or "maximum number of turns" in str(exc):
+            reply = self.collect(msgs)
+            if reply.tool_calls or reply.text:
+                return reply
+        raise exc
 
 
 class AnthropicAPIModel(Model):

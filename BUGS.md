@@ -24,6 +24,17 @@ Each entry: what broke, why, the fix, and the test that now guards it. The first
 
 ## More bugs
 
+### Live model failed with "Reached maximum number of turns" on its first tool call
+- **What broke:** in a live run (`make record-live`), "I need a plumber" then "this week" moved the workflow to SEARCHING, and the model call raised `ResultError: Claude Code returned an error result: Reached maximum number of turns`. The agent replied "something went wrong".
+- **Why:** `ClaudeAgentModel` runs the SDK with `max_turns=1` so that our own loop executes tools. When the model emits a `tool_use`, the Claude Code CLI wants a second turn to feed the result back. It hits the limit, emits an `error_max_turns` result and exits non-zero. The SDK turns that into a `ResultError` after the tool-use message has already been streamed. Offline tests used a constructed `success` result, so they never saw this.
+- **Fix:** `ClaudeAgentModel.respond` catches `error_max_turns` and returns the tool calls (and text) it already collected as `ModelReply.tool_calls`. Our loop then executes them with its limits and approval gate. Other errors are still raised. Error result text is never used as the reply. Verified live: "I need a plumber", "tomorrow" produced an approval card.
+- **Regression tests:** `tests/test_review_fixes.py::test_claude_agent_model_max_turns_returns_captured_tool_calls`, `::test_claude_agent_model_other_errors_still_raise` (fake SDK message stream).
+
+### "this week" on a Sunday meant today only
+- **What broke:** on Sunday 2026-11-08, "this week" was parsed as 2026-11-08 to 2026-11-08.
+- **Fix:** "this week" is now a rolling window from today through the next 6 days. On a Sunday, "this weekend" means today.
+- **Regression test:** `tests/test_review_fixes.py::test_relative_week_windows`.
+
 ### Tracer redacted its own token-count fields
 - **What broke:** `model_call` events logged `input_tokens`, `output_tokens` and `context_tokens` as "[REDACTED]", and `summary()` crashed trying to add up strings.
 - **Why:** the secret-key regex in `sanitize()` matched the substring "token" (and "pin", "otp", "card" inside unrelated keys).

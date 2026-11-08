@@ -116,13 +116,16 @@ def _dates(t: str, today: date) -> tuple[str | None, str | None]:
     if re.search(r"\btoday\b", t):
         return today.isoformat(), today.isoformat()
     if "this weekend" in t or "weekend" in t:
+        if today.weekday() == 6:  # already Sunday: "this weekend" is today
+            return today.isoformat(), today.isoformat()
         sat = today + timedelta(days=(5 - today.weekday()) % 7)
         return sat.isoformat(), (sat + timedelta(days=1)).isoformat()
     if "next week" in t:
         mon = today + timedelta(days=7 - today.weekday())
         return mon.isoformat(), (mon + timedelta(days=6)).isoformat()
     if "this week" in t:
-        return today.isoformat(), (today + timedelta(days=6 - today.weekday())).isoformat()
+        # rolling 7-day window: "this week" on a Sunday must not collapse to today only
+        return today.isoformat(), (today + timedelta(days=6)).isoformat()
     for i, wd in enumerate(_WEEKDAYS):
         if re.search(rf"\b{wd}\b", t):
             d = today + timedelta(days=(i - today.weekday()) % 7 or 7)
