@@ -6,6 +6,7 @@ correction ("actually Koramangala") changes one field and nothing else.
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
@@ -151,11 +152,24 @@ def _dates(t: str, today: date) -> tuple[str | None, str | None]:
     if "this week" in t:
         # rolling 7-day window: "this week" on a Sunday must not collapse to today only
         return today.isoformat(), (today + timedelta(days=6)).isoformat()
+    i = _weekday(t)
+    if i is not None:
+        d = today + timedelta(days=(i - today.weekday()) % 7 or 7)
+        return d.isoformat(), d.isoformat()
+    return None, None
+
+
+def _weekday(t: str) -> int | None:
+    """Weekday named in t, tolerating one typo ("staurday", "wensday"): exact names first, then a word whose
+    letters match exactly one weekday closely (difflib ratio >= 0.85). Deterministic, no model call."""
     for i, wd in enumerate(_WEEKDAYS):
         if re.search(rf"\b{wd}\b", t):
-            d = today + timedelta(days=(i - today.weekday()) % 7 or 7)
-            return d.isoformat(), d.isoformat()
-    return None, None
+            return i
+    for w in re.findall(r"[a-z]{6,}", t):
+        hits = [i for i, wd in enumerate(_WEEKDAYS) if SequenceMatcher(None, w, wd).ratio() >= 0.85]
+        if len(hits) == 1:
+            return hits[0]
+    return None
 
 
 def _slot(t: str) -> str | None:

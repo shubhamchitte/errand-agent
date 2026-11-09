@@ -292,3 +292,24 @@ def test_proactive_no_notice_for_user_cancel(tmp_path, ev):
     notices = w.agent.poll_and_handle_events()
     ev.actual(f"notices={notices} pending={w.pending()} ignored events={len(w.events('event_ignored'))}")
     assert notices == [] and w.pending() is None and w.events("event_ignored")
+
+
+# ------------------------------------------------------------------ live run run_8ab65179
+@sc(category="price changed after approval", expected="live sequence with a typo'd weekday: card moves to Saturday, compare and review question keep it, yes re-asks at the drifted price")
+def test_live_demo_typo_saturday_then_reviews_then_yes(tmp_path, ev):
+    """run_8ab65179: 'i want staurday time 12 noon' lost the date, so no Saturday card existed and 'yes' found nothing."""
+    from errand_agent.__main__ import make_scenario
+    w = World(tmp_path, make_scenario("demo"))
+    w.say("plumber need")
+    w.say(f"on {MON}")  # FakeClock is a Saturday, so the live "tommorow" would be a closed Sunday
+    first = w.pending()
+    w.say("i want staurday time 12 noon")
+    sat = w.pending()
+    assert w.slots()["date_start"] == "2026-11-14" and sat is not None and sat.action_id != first.action_id
+    assert sat.card.slot.startswith("2026-11-14")
+    w.say("compare my options")
+    w.say("reviews on quickfix")
+    assert w.pending().action_id == sat.action_id
+    out = w.say("yes")
+    ev.actual(f"sat card {sat.card.slot}; after reviews+yes: book={w.calls('book')} reask={'1,350' in out}")
+    assert w.calls("book") == 0 and "nothing waiting" not in out.lower() and "1,350" in out

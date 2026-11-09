@@ -70,3 +70,9 @@ Each entry: what broke, why, the fix, and the test that now guards it. The first
 - **How found:** the randomized invariant sweep (`scripts/check_invariants.py`, seed 252), invariant "forgotten facts never appear in a model payload".
 - **Fix:** `ContextBuilder` replaces the values of forgotten facts in history with "[forgotten]" before building the payload.
 - **Regression test:** `tests/test_review_fixes.py::test_forgotten_fact_scrubbed_from_history`.
+
+### Misspelled weekday dropped the date, so "yes" found no card (live run run_8ab65179)
+- **What broke:** while recording the live demo, the user typed "i want staurday time 12 noon". After compare and "reviews on quickfix", "yes" answered "there is nothing waiting for my approval".
+- **Why:** the router only knew exact weekday names, so "staurday" set the time but not the date. The time change correctly invalidated the Tuesday card. The model then searched Saturday on its own, but the saved dates still said Tuesday, so the Saturday proposal was refused as outside the requested dates. No card existed from then on; the compare and review turns did not touch approval state, and the "yes" reply was accurate.
+- **Fix:** the router accepts a word that closely matches exactly one weekday ("staurday", "thrusday", "wensday"); fixed similarity cutoff, no model call.
+- **Regression test:** `evals/test_changes.py::test_live_demo_typo_saturday_then_reviews_then_yes` (live wording, scripted model, demo scenario: Saturday card, compare, review question, yes re-asks at ₹1,350).
