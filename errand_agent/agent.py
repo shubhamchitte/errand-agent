@@ -545,7 +545,7 @@ class Agent:
         if sl.earliest_time and card.slot[11:16] >= sl.earliest_time:
             parts.append(f"after your {sl.earliest_time} earliest" + cite(from_mem.get("earliest_time")))
         if sl.preferred_time:
-            parts.append(f"closest to your {sl.preferred_time} request" if card.slot[11:16] != sl.preferred_time
+            parts.append(f"{sl.preferred_time} isn't free, nearest is {card.slot[11:16]}" if card.slot[11:16] != sl.preferred_time
                          else f"at your {sl.preferred_time} request")
         pref = next((f for f in facts.values() if f.key.startswith("pref.") and card.provider_id in f.value), None)
         if pref:

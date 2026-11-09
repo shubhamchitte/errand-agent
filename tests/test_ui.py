@@ -182,4 +182,5 @@ def test_date_and_time_correction(tmp_path, msg):
     assert sl.budget_inr == 1500 and sl.area == "Indiranagar" and sl.earliest_time == "10:00"
     new = a.gate.active()
     assert new.action_id != old.action_id and "Sat 14 Nov" in out
+    assert "12:00 isn't free, nearest is" in out or new.card.slot[11:16] == "12:00"
     assert new.card.slot[11:16] in ("11:00", "12:00", "12:30")
