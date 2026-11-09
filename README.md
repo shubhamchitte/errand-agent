@@ -202,4 +202,4 @@ Handing real decisions, and eventually real money, to an assistant only works if
 
 ## Extras
 
-- Demo video: <link>
+- Demo video: https://www.loom.com/share/40a5609e4daa491ea0c83a5f9947af65
