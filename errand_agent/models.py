@@ -137,9 +137,16 @@ def _compare_answer(ctx: Context, st: dict, sl: dict) -> ModelReply:
         dr = {"start": sl.get("date_start"), "end": sl.get("date_end") or sl.get("date_start")} if sl.get("date_start") else None
         return ModelReply(tool_calls=[ToolCall("search_providers", {"service": sl["service"], "area": "", "date_range": dr})])
     provs = [{**p, "in_requested_area": not sl.get("area") or p["area"] == sl["area"]} for p in sr[-1].get("providers", [])]
-    cands = rank(provs, sl)[:3]
+    cands = rank(provs, sl)[:5]
     if not cands:
         return ModelReply(text="Nothing fits all your constraints to compare. Want me to relax the budget, time or dates?")
+    from .text import INJECTION_RE
+    seen = {g.get("provider_id"): g for g in _results(ctx, "get_provider")}
+    need = [p["provider_id"] for p, _ in cands if p["provider_id"] not in seen]
+    if need:  # read-only look at each provider's reviews, only to count flagged ones
+        return ModelReply(tool_calls=[ToolCall("get_provider", {"provider_id": pid}) for pid in need])
+    flagged = {pid: sum(1 for r in g.get("reviews") or [] if INJECTION_RE.search(r.get("text", "")))
+               for pid, g in seen.items()}
     pick = st.get("pending_pick") or {}
 
     def mark(p, s):
@@ -147,10 +154,14 @@ def _compare_answer(ctx: Context, st: dict, sl: dict) -> ModelReply:
             h = pick["hold"]
             return f" - {h}" if h.startswith("your pick") else f" - your pick ({h})"
         return ""
-    lines = [f"{i}. {p['name']} ({p['provider_id']}): {inr(p['price_inr'])}, rated {p['rating']}, {p['area']}, {when(s)}{mark(p, s)}"
-             for i, (p, s) in enumerate(cands, 1)]
+    def fit(p):
+        note = "in your area" if p.get("in_requested_area") and sl.get("area") else (f"outside {sl['area']}" if sl.get("area") else "")
+        n = flagged.get(p["provider_id"], 0)
+        return "".join(f"; {x}" for x in (note, f"{n} review flagged" if n == 1 else f"{n} reviews flagged" if n else "") if x)
+    lines = [f"{i}. {p['name']} ({p['provider_id']}): {inr(p['price_inr'])}, rated {p['rating']}, {p['area']}, "
+             f"{when(s)}{fit(p)}{mark(p, s)}" for i, (p, s) in enumerate(cands, 1)]
     tail = "\nYour pending approval is unchanged." if st.get("pending_approval") else ""
-    return ModelReply(text="Here are your best options:\n" + "\n".join(lines) + tail)
+    return ModelReply(text="Here are your options:\n" + "\n".join(lines) + tail)
 
 
 def heuristic_policy(ctx: Context, tools: list[dict], tracer=None) -> ModelReply:
@@ -207,7 +218,7 @@ def heuristic_policy(ctx: Context, tools: list[dict], tracer=None) -> ModelReply
             return ModelReply(tool_calls=[ToolCall("propose_cancel", {"booking_id": b["booking_id"]})])
         target = sl.get("slot")
         if not target and sl.get("date_start"):
-            hh = sl.get("earliest_time") or b["slot"].split("T")[1]
+            hh = sl.get("preferred_time") or sl.get("earliest_time") or b["slot"].split("T")[1]
             target = f"{sl['date_start']}T{hh}"
         if not target:
             return ModelReply(text=f"When would you like to move booking {b['booking_id']} ({b['slot']}) to?")

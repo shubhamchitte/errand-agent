@@ -70,10 +70,11 @@ def test_demo_scenario_beats(tmp_path):
     a, tr = _demo_agent(tmp_path)
     assert "date" in a.handle_user_message("I need a plumber")
     assert "Please approve" in a.handle_user_message("tomorrow")
-    out = a.handle_user_message("actually make it Saturday")
-    assert "Sat" in out and "₹1,500" in out and "Indiranagar" in out and "1 min" in out
+    out = a.handle_user_message("actually make it Saturday at 12")
+    assert "Sat" in out and "₹1,500" in out and "Indiranagar" in out and "1 min" in out and "11:00" in out
     cmp_ = a.handle_user_message("compare my options")
     assert "Sharma" in cmp_ and "pending approval is unchanged" in cmp_
+    assert "QuickFix" in cmp_ and "1 review flagged" in cmp_ and cmp_.index("QuickFix") < len(cmp_)
     out = a.handle_user_message("what do the reviews say about QuickFix?")
     assert "Flagged" in out and "ignored" in out and "Nothing has changed" in out
     assert a.gate.active() is not None and a.gate.active().card.provider_name.startswith("Sharma")
@@ -162,3 +163,23 @@ def test_full_trace_render_and_exit(tmp_path):
     _print_exit(out, tr, [("you", "hi"), ("agent", "hello")])
     assert (tmp_path / "ui2.chat.txt").read_text().startswith("you> hi")
     assert "ui2.jsonl" in out.export_text()
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("msg", ["actually make it Saturday at 12", "actually make it Saturday 12 afternoon",
+                                 "actually saturday 12pm", "actually make it Saturday around noon",
+                                 "actually shanivar 12 baje"])
+def test_date_and_time_correction(tmp_path, msg):
+    a, _ = _demo_agent(tmp_path)
+    a.handle_user_message("I need a plumber")
+    a.handle_user_message("tomorrow")
+    old = a.gate.active()
+    out = a.handle_user_message(msg)
+    sl = a.store.load().slots
+    assert sl.date_start == "2026-11-14" and sl.preferred_time == "12:00"
+    assert sl.budget_inr == 1500 and sl.area == "Indiranagar" and sl.earliest_time == "10:00"
+    new = a.gate.active()
+    assert new.action_id != old.action_id and "Sat 14 Nov" in out
+    assert new.card.slot[11:16] in ("11:00", "12:00", "12:30")

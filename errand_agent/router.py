@@ -78,6 +78,27 @@ def _time(t: str) -> str | None:
     return f"{h:02d}:{mi:02d}" if 0 <= h < 24 else None
 
 
+_NOT_PREF = r"(?<!after )(?<!from )(?<!before )(?<!than )(?<!earliest )"
+
+
+def _preferred_time(t: str) -> str | None:
+    """A wanted time of day ("at 12", "12pm", "12 afternoon", "around noon", "12 baje"), not a not-before bound."""
+    if re.search(r"\b(?:around|about|near|at)\s+noon\b|\bnoon\b", t):
+        return "12:00"
+    m = (re.search(_NOT_PREF + r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|afternoon|evening|morning|baje(?!\s*(?:ke|k)?\s*baad))", t)
+         or re.search(_NOT_PREF + r"\bat\s+(\d{1,2})(?::(\d{2}))?()\b(?!-)", t))
+    if not m:
+        return None
+    h, mi, ap = int(m.group(1)), int(m.group(2) or 0), m.group(3)
+    if ap in ("pm", "afternoon", "evening"):
+        h = h + 12 if h < 12 else h
+    elif ap == "am" and h == 12:
+        h = 0
+    elif ap in ("", "baje") and 1 <= h <= 7:  # bare hour for a home visit: 1..7 means afternoon/evening
+        h += 12
+    return f"{h:02d}:{mi:02d}" if 0 <= h < 24 and mi < 60 else None
+
+
 def _budget(t: str) -> int | None:
     m = re.search(r"(?:₹|rs\.?|inr)?\s*(\d[\d,]*)\s*(?:rs|rupay[ae]?|rupees)?\s*(?:tak|ke andar|se kam|max)\b", t)
     if m:
@@ -171,6 +192,8 @@ def extract_slots(text: str, now: datetime) -> dict:
         out["date_start"], out["date_end"] = ds, de
     if (tm := _time(t)):
         out["earliest_time"] = tm
+    if (pt := _preferred_time(t)) and pt != out.get("earliest_time"):
+        out["preferred_time"] = pt
     if (b := _budget(t)) is not None:
         out["budget_inr"] = b
     if (m := re.search(r"\b(p_[a-z]+_\d+)\b", t)):

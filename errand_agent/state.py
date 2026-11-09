@@ -60,6 +60,7 @@ class Slots:
     date_start: str | None = None   # YYYY-MM-DD
     date_end: str | None = None
     earliest_time: str | None = None  # HH:MM
+    preferred_time: str | None = None  # HH:MM, a wanted time of day (not a bound)
     budget_inr: int | None = None
     provider_id: str | None = None
     booking_id: str | None = None

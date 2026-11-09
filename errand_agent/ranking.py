@@ -47,6 +47,11 @@ def rank(providers: list[dict], slots: dict | None = None, preferred: set[str] |
                             sl.get("earliest_time"))
         if not fit:
             continue
+        pt = sl.get("preferred_time")
+        if pt:  # slot nearest the wanted time of day (earlier one on a tie)
+            mins = lambda x: int(x[11:13]) * 60 + int(x[14:16])
+            want = int(pt[:2]) * 60 + int(pt[3:5])
+            fit = sorted(fit, key=lambda x: (abs(mins(x) - want), x))
         key = (not p.get("in_requested_area", True), -p["rating"], p["price_inr"],
                p["provider_id"] not in preferred, fit[0], p["provider_id"])
         ranked.append((key, p, fit[0]))

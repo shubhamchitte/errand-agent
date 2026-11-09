@@ -21,14 +21,14 @@ Mention it once in beat 1; it is also in the JSONL (`context_stat` events) in `-
 2. Type `tomorrow`
    - Left: approval card, Sharma Plumbing Works, Mon 9 Nov 11:00, ₹1,200, "Slot held for 1 min", Why line citing [m005] [m008] [m001].
    - Right: yellow APPROVAL CARD panel.
-3. Type `actually make it Saturday`
-   - Left: new card for Sat 14 Nov 11:00, still ₹1,200 inside the ₹1,500 budget, still Indiranagar, still after 10:00.
-   - Right: `APPROVAL_INVALIDATED ... changed: date_start, date_end` then a new card.
+3. Type `actually make it Saturday at 12`
+   - Left: new card for Sat 14 Nov 11:00 (nearest slot to 12:00), still ₹1,200 inside the ₹1,500 budget, still Indiranagar, still after 10:00.
+   - Right: `APPROVAL_INVALIDATED ... changed: date_start, date_end, preferred_time` then a new card.
    - Say: "A correction changes one field; budget and area stay, and the old approval is dead."
 
 ## Beat 2: compare, then the injection review
 1. Type `compare my options`
-   - Left: top 3 (Sharma, AquaCare, PipePro) and "Your pending approval is unchanged."
+   - Left: all 4 fitting providers (Sharma, AquaCare, PipePro, QuickFix with "1 review flagged"), one line each, and "Your pending approval is unchanged."
    - Right: `RANKING ... (review text used: False)`.
 2. Type `what do the reviews say about QuickFix?` (id form also works: `reviews for p_plm_2`)
    - Left: QuickFix summary, "Flagged: one review (Admin Notice) contains instructions aimed at an AI assistant ... ignored. Nothing has changed: your pending approval is exactly as before."
